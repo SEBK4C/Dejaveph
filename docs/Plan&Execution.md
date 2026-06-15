@@ -13,7 +13,7 @@ Companion docs: [`DEVLOG.md`](DEVLOG.md) (per-iteration narrative), [`DEPLOYMENT
 | ⬜ | Not started |
 | ❄️ | Deferred / blocked (reason noted) |
 
-_Last updated: 2026-06-15 (after loop iteration 6)._
+_Last updated: 2026-06-15 (after loop iteration 7)._
 
 ---
 
@@ -86,12 +86,13 @@ Findings from the rolling audit. Severity from the original review of `main@0b28
 | MED | local-fs presign is unsigned/non-expiring (doc says HMAC) | MED | 🔵 | PR #7 — BLAKE3-keyed MAC + TTL; `/xorb-data` = capability OR bearer |
 | MED | concurrent `put` of same novel xorb: corrupt object + double-count | MED | 🔵 | PR #8 — unique temp + hard-link publish |
 | MED | `register_file` chunk-count amplification (tiny body → huge alloc) | MED | 🔵 | PR #9 — `MAX_FILE_CHUNKS` cap |
-| MED | `put_xorb` decompression bomb (unbounded decompress in validate) | MED | ⬜ | **fork-level**: enforce `MAX_CHUNK_SIZE` in `deserialize_chunk_*` (size-capped writer) |
+| LOW | `put_xorb` decompression "bomb" — **largely verified-negative (iter7)** | LOW | ⬜ | fork's `deserialize_chunk_header` already rejects `uncompressed>128KiB`/`compressed>256KiB` **before** decompress, so no GB-OOM. Residual: a 256 KiB compressed chunk can transiently decompress to ~64 MiB before the length check rejects (concurrency-amplifiable). Real fix = size-capped writer in the fork's `deserialize_chunk_with_header_to_writer`. An xetd-side header pre-scan is **redundant** (same thresholds) — backed out. |
 | LOW | no TLS (cleartext bearer) | LOW | ⬜ | deployment: front with TLS proxy (doc'd in DEPLOYMENT.md) |
 
 ### Future audit angles (queued, ~1 per iteration)
-- [~] Unbounded allocation / decompression bomb — register amplification **done iter6 (PR #9)**;
-  the `deserialize_chunk` decompression bomb is identified and needs a **fork-level** size cap.
+- [x] Unbounded allocation / decompression bomb — register amplification **done iter6 (PR #9)**;
+  the `deserialize_chunk` "bomb" is **verified-negative (iter7)** for GB-OOM (fork caps it before
+  decompress); residual ~64 MiB transient is LOW, fork-level size-cap noted in §B.
 - ⬜ Volume/path catalog: no per-volume auth scoping (tokens are global).
 - [x] Idempotency / race in concurrent `put_xorb` — **done iter5 (PR #8)**; GC race done iter2.
 - ⬜ Fuzz the xorb footer parser + `parse_range` (cargo-fuzz / arbitrary).
