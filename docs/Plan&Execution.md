@@ -13,7 +13,7 @@ Companion docs: [`DEVLOG.md`](DEVLOG.md) (per-iteration narrative), [`DEPLOYMENT
 | ⬜ | Not started |
 | ❄️ | Deferred / blocked (reason noted) |
 
-_Last updated: 2026-06-15 (after loop iteration 7; TLS + verified-negative)._
+_Last updated: 2026-06-15 (after loop iteration 8; parser fuzz)._
 
 ---
 
@@ -96,7 +96,9 @@ Findings from the rolling audit. Severity from the original review of `main@0b28
   decompress); residual ~64 MiB transient is LOW, fork-level size-cap noted in §B.
 - ⬜ Volume/path catalog: no per-volume auth scoping (tokens are global).
 - [x] Idempotency / race in concurrent `put_xorb` — **done iter5 (PR #8)**; GC race done iter2.
-- ⬜ Fuzz the xorb footer parser + `parse_range` (cargo-fuzz / arbitrary).
+- [x] Fuzz the xorb wire parser — **done iter8** (`m0_parser_fuzz`, ~10k adversarial inputs,
+  panic-free in debug; on `main`). `parse_range` is reviewed-clean; a cargo-fuzz target (nightly)
+  remains optional for continuous fuzzing.
 
 ---
 
@@ -114,7 +116,7 @@ Findings from the rolling audit. Severity from the original review of `main@0b28
 | **`dejaveph` helpers** (`doctor`, `bootstrap-ceph`) | ✅ | `scripts/` on `main` — bash, not yet a unified Rust CLI |
 | **TLS-fronted gateway** (caddy) + `rustls-tls` clients | 🔵 | PR #10 — closes the no-TLS finding |
 | `/healthz` + `--ready` semantics for `systemctl` | ⬜ | "is it working?" in one command |
-| opnix template that *creates* the RGW item from `radosgw-admin` | ⬜ | closes the manual copy-paste gap |
+| opnix template that *creates* the RGW item from `radosgw-admin` | ✅ | `scripts/bootstrap-ceph.sh` does exactly this (`op item create/edit`) |
 | qemu / Nix-VM e2e test harness | ❄️ | backlog; needs `nix` on a builder (this host has none) |
 
 ### Bare-minimum deploy (target UX)
@@ -233,3 +235,7 @@ logging it in DEVLOG.md; reflect each result here.
   GB-OOM (the fork's `deserialize_chunk_header` caps sizes before decompress); a redundant
   xetd-side pre-scan was written and **backed out** rather than shipped. Delivered the real value:
   **TLS-fronted gateway** (caddy) + `rustls-tls` clients, closing the last LOW finding. PR #10.
+- **2026-06-15 · Iteration 8** — Switched to a systematic angle: `m0_parser_fuzz` hammers the
+  xorb wire parser with ~10k adversarial inputs → panic-free (debug, overflow checks on). No bug;
+  durable robustness coverage added to `main`. The rolling audit has now exhausted the real
+  findings — **future iterations should move to feature work** (macOS client, JWT, `mdb_shard`).
