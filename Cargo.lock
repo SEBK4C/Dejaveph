@@ -4390,6 +4390,7 @@ name = "xetfs"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "clap",
  "fuser",
  "libc",
  "reqwest 0.12.28",

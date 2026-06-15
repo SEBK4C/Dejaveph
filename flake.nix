@@ -69,15 +69,25 @@
           buildInputs = (old.buildInputs or [ ]) ++ [ pkgs.openssl ];
         });
 
+        # `nix build .#xetfs` -> ./result/bin/xetfs   (the client-side mount CLI)
+        packages.xetfs = self.packages.${system}.xetd.overrideAttrs (old: {
+          pname = "xetfs";
+          cargoBuildFlags = [ "-p" "xetfs" ];
+          meta = (old.meta or { }) // { mainProgram = "xetfs"; };
+        });
+
         packages.default = self.packages.${system}.xetd;
 
-        # `nix flake check` builds both server variants.
+        # `nix flake check` builds the server variants + the mount CLI.
         checks.xetd = self.packages.${system}.xetd;
         checks.xetd-s3 = self.packages.${system}.xetd-s3;
+        checks.xetfs = self.packages.${system}.xetfs;
       })) // {
-        # System-independent: the NixOS module (see ./nixos/module.nix, ./nixos/example.nix,
-        # and docs/DEPLOYMENT.md). Import alongside opnix for 1Password-backed RGW secrets.
+        # System-independent NixOS modules (see ./nixos/*.nix and docs/DEPLOYMENT.md).
+        # `default` = server; compose `xetd` + `xetfs` for a full server+client deployment.
+        # Import alongside opnix for 1Password-backed RGW creds and mount tokens.
         nixosModules.default = import ./nixos/module.nix;
         nixosModules.xetd = import ./nixos/module.nix;
+        nixosModules.xetfs = import ./nixos/xetfs.nix;
       };
 }

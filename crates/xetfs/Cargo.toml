@@ -9,8 +9,15 @@ description = "Reconstructing FUSE filesystem over a Xet CAS (Prompt.md §9). M0
 name = "xetfs"
 path = "src/lib.rs"
 
+# Mount CLI: `xetfs --server <url> --volume <v> [--rw] <mountpoint>` — a foreground FUSE mount,
+# ideal as a systemd service (see nixos/xetfs.nix).
+[[bin]]
+name = "xetfs"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = { workspace = true }
+clap = { workspace = true }
 # default-features=false avoids libfuse/pkg-config; mounting goes through setuid `fusermount`.
 fuser = { version = "0.14", default-features = false }
 libc = "0.2"
