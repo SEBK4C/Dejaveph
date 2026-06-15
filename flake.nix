@@ -89,5 +89,23 @@
         nixosModules.default = import ./nixos/module.nix;
         nixosModules.xetd = import ./nixos/module.nix;
         nixosModules.xetfs = import ./nixos/xetfs.nix;
+
+        # Plug-and-play deployment templates — `nix flake init -t github:SEBK4C/Dejaveph#<name>`.
+        # The three-machine topology: storage (Ceph, BYO) → gateway (xetd) → client (xetfs).
+        templates = {
+          gateway = {
+            path = ./templates/gateway;
+            description = "Gateway host: xetd on Ceph RGW + 1Password (opnix) secrets";
+          };
+          client = {
+            path = ./templates/client;
+            description = "Client host: xetfs mounts (token from 1Password)";
+          };
+          demo = {
+            path = ./templates/demo;
+            description = "Single box: xetd local-fs + a local mount, zero secrets";
+          };
+          default = self.templates.demo;
+        };
       };
 }
