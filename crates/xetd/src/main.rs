@@ -188,16 +188,27 @@ async fn auth_mw(State(st): State<Arc<AppState>>, req: axum::extract::Request, n
     if token.is_empty() {
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     }
+    // Constant-time comparison so token validity can't be inferred from response timing.
+    // Evaluate both candidates (no short-circuit) before OR-ing.
     let ok = if need_write {
-        token == st.write_token
+        ct_eq(&token, &st.write_token)
     } else {
-        token == st.read_token || token == st.write_token
+        let r = ct_eq(&token, &st.read_token);
+        let w = ct_eq(&token, &st.write_token);
+        r | w
     };
     if ok {
         next.run(req).await
     } else {
         (StatusCode::FORBIDDEN, "insufficient scope").into_response()
     }
+}
+
+/// Constant-time string equality for bearer tokens. `subtle` short-circuits only on length
+/// (public structure here), then compares the random bytes without data-dependent branching.
+fn ct_eq(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
 /// Opaque per-process bearer token (16 CSPRNG bytes). Real JWT issuance is a refinement.
@@ -279,7 +290,7 @@ async fn reconstruct(State(st): State<Arc<AppState>>, AxPath(file_hash_hex): AxP
         byte_end: u64,
     }
     let collected: Result<Vec<Resolved>, StatusCode> = {
-        let idx = st.index.lock().unwrap();
+        let idx = st.index.lock();
         match idx.files.get(&fh) {
             None => Err(StatusCode::NOT_FOUND),
             Some(file) => {
@@ -344,7 +355,7 @@ async fn register_file(State(st): State<Arc<AppState>>, Json(req): Json<Register
     let Ok(fh) = DataHash::from_hex(&req.file_hash) else {
         return (StatusCode::BAD_REQUEST, "malformed file hash").into_response();
     };
-    let mut idx = st.index.lock().unwrap();
+    let mut idx = st.index.lock();
 
     let mut terms = Vec::with_capacity(req.terms.len());
     for t in &req.terms {
@@ -386,7 +397,7 @@ struct EntryOut {
 
 /// List a volume's catalog entries (path → file_hash + size) for the VFS mount (§9.1).
 async fn list_entries(State(st): State<Arc<AppState>>, AxPath(volume): AxPath<String>) -> Response {
-    let idx = st.index.lock().unwrap();
+    let idx = st.index.lock();
     let mut out = Vec::new();
     for ((vol, path), fh) in idx.catalog.iter() {
         if vol == &volume {
@@ -427,7 +438,7 @@ async fn put_xorb(
     };
     if inserted {
         {
-            let mut idx = st.index.lock().unwrap();
+            let mut idx = st.index.lock();
             idx.put_xorb(hash, &info);
             idx.index_chunks(hash, &info); // populate the global dedup index
         }
@@ -490,7 +501,7 @@ async fn global_dedup(
     let Ok(ch) = DataHash::from_hex(&chunk_hex) else {
         return (StatusCode::BAD_REQUEST, "malformed chunk hash").into_response();
     };
-    let hit = st.index.lock().unwrap().chunk_index.get(&ch).map(|loc| {
+    let hit = st.index.lock().chunk_index.get(&ch).map(|loc| {
         json!({ "xorb": loc.xorb.hex(), "chunk_index": loc.index, "unpacked_length": loc.unpacked_len })
     });
     match hit {
@@ -525,7 +536,7 @@ async fn test_noop() -> Json<serde_json::Value> {
 /// BlobStore and the index. (A grace period for in-flight uploads is a later refinement.)
 async fn test_gc(State(st): State<Arc<AppState>>) -> Response {
     let (referenced, all): (HashSet<DataHash>, Vec<DataHash>) = {
-        let idx = st.index.lock().unwrap();
+        let idx = st.index.lock();
         let mut refd = HashSet::new();
         for f in idx.files.values() {
             for t in &f.terms {
@@ -538,7 +549,7 @@ async fn test_gc(State(st): State<Arc<AppState>>) -> Response {
     for x in all {
         if !referenced.contains(&x) {
             let _ = st.blob.delete(&x).await;
-            let mut idx = st.index.lock().unwrap();
+            let mut idx = st.index.lock();
             idx.xorbs.remove(&x);
             idx.chunk_index.retain(|_, loc| loc.xorb != x);
             swept += 1;
@@ -549,7 +560,7 @@ async fn test_gc(State(st): State<Arc<AppState>>) -> Response {
 
 /// Scrub (§11.2): re-verify each stored xorb's Merkle root; count mismatches as quarantined.
 async fn test_scrub(State(st): State<Arc<AppState>>) -> Response {
-    let xorbs: Vec<DataHash> = st.index.lock().unwrap().xorbs.keys().copied().collect();
+    let xorbs: Vec<DataHash> = st.index.lock().xorbs.keys().copied().collect();
     let mut checked = 0u64;
     let mut quarantined = 0u64;
     for x in xorbs {

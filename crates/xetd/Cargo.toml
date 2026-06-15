@@ -24,6 +24,11 @@ tracing-subscriber = { workspace = true }
 # CSPRNG for bearer-token minting via the getrandom(2) syscall (robust even when /dev is
 # restricted — the failure mode that produced an all-zero token before; HIGH-2).
 getrandom = "0.3"
+# Non-poisoning Mutex: a panic while holding the index lock must NOT brick every later
+# request (std::sync::Mutex poisons → permanent DoS). Defends the whole panic-under-lock class.
+parking_lot = "0.12"
+# Constant-time bearer-token comparison (timing side-channel hardening).
+subtle = "2"
 # S3 / Ceph-RGW backend (M4) — opt-in so the default build (and the CI gate) stay lean.
 aws-sdk-s3 = { version = "1", optional = true }
 

@@ -39,6 +39,28 @@ failure rather than serve a degraded token.
 **Tests.** Added regression coverage asserting malformed term ranges are rejected (`400`) and
 never reach the panicking path.
 
+**Second angle (same iteration) — footer-offset poison via `POST /xorbs`.**
+Hypothesis: a validly-rooted xorb could carry inconsistent footer arrays (short or
+non-monotonic `unpacked_chunk_offsets`) that pass the integrity gate but then underflow/OOB in
+`Index::index_chunks` — which runs *under the index lock*, so same poison-DoS class via a
+different entry point. **Verified NEGATIVE:** the fork's `XorbObject::deserialize` rejects any
+`boundaries_version != 1` (xorb_object_format.rs:581,666) and enforces all three footer arrays
+have length `== num_chunks` (589–612); `validate_xorb_object` checks `unpacked_chunk_offsets`
+against the actual cumulative decompressed sizes (1136–1141), guaranteeing monotonicity. So
+`end - prev_end` can't underflow and `[i]` can't OOB. The gate already defends this — no patch
+needed, documented as a confirmed-safe path.
+
+But the investigation reframed the real risk: **the amplifier is `std::sync::Mutex` poisoning**
+— *any* panic under the lock (the two found, plus any future one) bricks the whole server.
+Patched the class, not just the instances:
+- **Poison-proof locking:** `Index` mutex → `parking_lot::Mutex`; a panic while holding it
+  releases on unwind instead of poisoning. One panicking request can no longer brick the rest.
+- **Constant-time token compare:** `auth_mw` now uses `subtle::ConstantTimeEq` (no
+  data-dependent branch on the secret), closing a timing side-channel (was MEDIUM in iter-1).
+
+Tests re-run after both changes: m0_register_validation, m5_operate (token path), m0/m1, and
+FUSE m3 all green.
+
 ### Backlog / hypotheses for later iterations
 - [ ] MEDIUM: `register_file` does not verify `file_hash` commits to the terms' content
       (content-addressing bypass / cache poisoning). Closes with the binary `mdb_shard` path.
