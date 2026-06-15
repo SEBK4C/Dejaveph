@@ -43,11 +43,13 @@ pub struct LocalFsBlobStore {
     root: PathBuf,
     /// xetd's externally reachable base URL, used to build `/xorb-data` presign URLs.
     public_base: String,
+    /// Per-process key for signing `/xorb-data` capability URLs (§10).
+    cap_key: [u8; 32],
 }
 
 impl LocalFsBlobStore {
-    pub fn new(root: impl Into<PathBuf>, public_base: impl Into<String>) -> Self {
-        Self { root: root.into(), public_base: public_base.into() }
+    pub fn new(root: impl Into<PathBuf>, public_base: impl Into<String>, cap_key: [u8; 32]) -> Self {
+        Self { root: root.into(), public_base: public_base.into(), cap_key }
     }
 
     fn path_for(&self, key: &MerkleHash) -> PathBuf {
@@ -103,8 +105,13 @@ impl BlobStore for LocalFsBlobStore {
         Ok(Bytes::from(buf))
     }
 
-    async fn presign_get(&self, key: &MerkleHash, _ttl: Duration) -> Result<String> {
-        Ok(format!("{}/api/v1/xorb-data/{}", self.public_base, key.hex()))
+    async fn presign_get(&self, key: &MerkleHash, ttl: Duration) -> Result<String> {
+        // Time-limited capability URL: signed over (hash, exp) so the bulk path needs no bearer
+        // and grants access to exactly this object until it expires (§5.4, §10).
+        let h = key.hex();
+        let exp = crate::cap::now_unix() + ttl.as_secs();
+        let sig = crate::cap::sign(&self.cap_key, &h, exp);
+        Ok(format!("{}/api/v1/xorb-data/{}?exp={}&sig={}", self.public_base, h, exp, sig))
     }
 
     async fn delete(&self, key: &MerkleHash) -> Result<()> {

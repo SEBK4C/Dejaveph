@@ -6,6 +6,31 @@ patch+test it → push. Isolation, deployment, and QoL notes accumulate here.
 
 ---
 
+## Iteration 4 — 2026-06-15 ~12:55 UTC — capability-URL access control (branch `harden/security-iter4`, stacked on iter3)
+
+**Angle this round:** capability-based access control (vs auth/panic, resource, integrity).
+
+**Fix — local-fs `/xorb-data` was unsigned + non-expiring though docs claimed "HMAC-signed"
+(MEDIUM; deferred from iter2/iter3).** Implemented the real capability URL:
+- New `cap` module: a BLAKE3 keyed-hash MAC (HMAC-equivalent, key already in-tree) over
+  `(hash, exp)`. `presign_get` now returns `…/xorb-data/{hash}?exp=<unix>&sig=<mac>` with the
+  900 s TTL it was already passed. Per-process CSPRNG key (`getrandom`, fail-closed).
+- Access model = **capability OR bearer** (tokens mode; loopback stays open). `auth_mw` exempts
+  `/xorb-data` from the bearer requirement; the handler accepts a valid signed+unexpired
+  capability (bulk path needs no bearer, per §10) OR a valid read/write bearer. The additive
+  choice keeps **loopback `m0_xorbs`** and **bearer `m5_operate`** green while adding bearer-less
+  signed fetches.
+
+**Why feature-breaking → branch:** in tokens mode `/xorb-data` now rejects unsigned+unauth
+requests (was bearer-only). Resolves the §5.4/§10 doc-vs-code gap — the CLAUDE.md claim
+"HMAC-signed xorb-data endpoint for local-fs" is now true.
+
+**Tests:** `cap` unit tests (sign/verify, expiry, tamper, wrong-key/hash) + new integration
+`m4_capability` (signed URL serves bearer-less → 206; unsigned+no-bearer → 403; bearer → 206;
+tampered sig → 403). Full sweep green incl. FUSE; no stale mounts.
+
+---
+
 ## Iteration 3 — 2026-06-15 ~12:40 UTC — content-integrity + deploy templates (branch `harden/security-iter3`, stacked on iter2)
 
 **Angle this round:** content-addressing integrity (vs iter1 auth/panic, iter2 resource/concurrency).
@@ -132,6 +157,6 @@ FUSE m3 all green.
 - [ ] MEDIUM: non-constant-time bearer token comparison (`subtle::ConstantTimeEq`).
 - [x] LOW: `get_range` reads the whole object into memory per request (IO amplification). — iter2
 - [x] LOW: GC TOCTOU data-loss race (test-hooks only). — iter2
-- [ ] MEDIUM: local-fs presign HMAC+TTL capability URL (auth-model rework) — deferred from iter2.
+- [x] MEDIUM: local-fs presign HMAC+TTL capability URL — iter4 (capability OR bearer).
 - [ ] QoL: qemu/Nix-VM e2e harness; NixOS module with 1Password secret integration; Ceph
       plug-and-play deployment doc.

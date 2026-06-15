@@ -4368,6 +4368,7 @@ dependencies = [
  "async-trait",
  "aws-sdk-s3",
  "axum",
+ "blake3",
  "bytes",
  "clap",
  "fuser",

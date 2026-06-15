@@ -10,6 +10,7 @@
 //! `mdb_shard` wire format that stock `hf-xet` uses is a later refinement.
 
 mod blob;
+mod cap;
 #[cfg(feature = "s3")]
 mod s3;
 mod state;
@@ -18,7 +19,7 @@ use std::{collections::{HashMap, HashSet}, net::SocketAddr, path::PathBuf, sync:
 
 use axum::{
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path as AxPath, State},
+    extract::{DefaultBodyLimit, Path as AxPath, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -104,10 +105,15 @@ async fn main() -> anyhow::Result<()> {
     let base_url = format!("http://{addr}");
     tracing::info!(%addr, "listening");
 
+    // Per-process key for signing `/xorb-data` capability URLs. CSPRNG, fail-closed (a weak key
+    // would let anyone forge presign URLs in tokens mode).
+    let mut cap_key = [0u8; 32];
+    getrandom::fill(&mut cap_key).expect("CSPRNG (getrandom) unavailable — refusing to start");
+
     let blob: Arc<dyn BlobStore> = match args.backend {
         Backend::LocalFs => {
             let root = args.blob_root.clone().unwrap_or_else(|| args.data_dir.join("blobs"));
-            Arc::new(LocalFsBlobStore::new(root, base_url.clone()))
+            Arc::new(LocalFsBlobStore::new(root, base_url.clone(), cap_key))
         }
         Backend::S3 => construct_s3(&args).await?,
     };
@@ -115,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
         Auth::Loopback => AuthMode::Loopback,
         Auth::Tokens => AuthMode::Tokens,
     };
-    let state = AppState::new(blob, auth, random_token("read"), random_token("write"));
+    let state = AppState::new(blob, auth, random_token("read"), random_token("write"), cap_key);
     let app = router(args.test_hooks, state);
 
     if let Some(ready) = args.ready_file.as_ref() {
@@ -174,7 +180,13 @@ fn router(test_hooks: bool, state: Arc<AppState>) -> Router {
 /// (xorb/shard/file uploads) need write scope, GETs need read (write implies read).
 async fn auth_mw(State(st): State<Arc<AppState>>, req: axum::extract::Request, next: Next) -> Response {
     use axum::http::{header::AUTHORIZATION, Method};
-    if st.auth == AuthMode::Loopback || req.uri().path().starts_with("/admin/") {
+    // `/xorb-data` is the bulk path: it carries its own time-limited capability signature (§10),
+    // so it bypasses the bearer requirement here and self-authorizes in the handler (capability
+    // OR bearer). Loopback and `/admin/*` test hooks are also exempt.
+    if st.auth == AuthMode::Loopback
+        || req.uri().path().starts_with("/admin/")
+        || req.uri().path().starts_with("/api/v1/xorb-data/")
+    {
         return next.run(req).await;
     }
     let need_write = req.method() == Method::POST;
@@ -466,15 +478,47 @@ async fn put_xorb(
     Json(json!({ "was_inserted": inserted })).into_response()
 }
 
+/// Query params on a `/xorb-data` capability URL (§10): `?exp=<unix>&sig=<mac>`.
+#[derive(Deserialize)]
+struct CapQuery {
+    exp: Option<u64>,
+    sig: Option<String>,
+}
+
+/// In tokens mode, serving xorb bytes requires EITHER a valid time-limited capability signature
+/// (the bulk path; no bearer needed) OR a valid read/write bearer. Loopback is open.
+fn xorb_data_authorized(st: &AppState, hash_hex: &str, capq: &CapQuery, headers: &HeaderMap) -> bool {
+    if st.auth == AuthMode::Loopback {
+        return true;
+    }
+    if let (Some(exp), Some(sig)) = (capq.exp, capq.sig.as_deref()) {
+        if cap::verify(&st.cap_key, hash_hex, exp, sig, cap::now_unix()) {
+            return true;
+        }
+    }
+    if let Some(tok) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+    {
+        return ct_eq(tok, &st.read_token) | ct_eq(tok, &st.write_token);
+    }
+    false
+}
+
 /// §4.6 — serve ranged xorb bytes (local-fs path). `Range` is inclusive; emits `206`.
 async fn xorb_data(
     State(st): State<Arc<AppState>>,
     AxPath(hash_hex): AxPath<String>,
+    Query(capq): Query<CapQuery>,
     headers: HeaderMap,
 ) -> Response {
     let Ok(hash) = DataHash::from_hex(&hash_hex) else {
         return (StatusCode::BAD_REQUEST, "malformed xorb hash").into_response();
     };
+    if !xorb_data_authorized(&st, &hash_hex, &capq, &headers) {
+        return (StatusCode::FORBIDDEN, "missing or invalid capability/bearer").into_response();
+    }
     let Some(meta) = st.blob.head(&hash).await.ok().flatten() else {
         return StatusCode::NOT_FOUND.into_response();
     };
