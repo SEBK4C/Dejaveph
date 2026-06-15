@@ -6,12 +6,16 @@
 //! presigned RGW/S3 URL.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use xet_core::merklehash::MerkleHash;
+
+/// Process-wide counter for unique temp-file names (see `LocalFsBlobStore::put`).
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Lightweight existence/size probe (no body fetch).
 pub struct ObjectMeta {
@@ -62,21 +66,32 @@ impl LocalFsBlobStore {
 impl BlobStore for LocalFsBlobStore {
     async fn put(&self, key: &MerkleHash, bytes: Bytes) -> Result<bool> {
         let path = self.path_for(key);
+        // Fast path: already stored (content-addressed ⇒ identical bytes).
         if tokio::fs::try_exists(&path).await.unwrap_or(false) {
             return Ok(false);
         }
         let dir = path.parent().expect("fanned-out path always has a parent");
         tokio::fs::create_dir_all(dir).await?;
-        let tmp = dir.join(format!(".{}.tmp", key.hex()));
+
+        // Unique temp name per write: two concurrent uploads of the SAME novel xorb must NOT share
+        // a temp file. With a fixed `.{hash}.tmp` name the second writer's `O_TRUNC` open could
+        // truncate the first writer's bytes mid-publish, persisting a corrupt object under the
+        // content hash.
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = dir.join(format!(".{}.{}.{}.tmp", key.hex(), std::process::id(), seq));
         tokio::fs::write(&tmp, &bytes).await?;
-        match tokio::fs::rename(&tmp, &path).await {
+
+        // Publish atomically AND idempotently via hard-link. Unlike `rename` (which silently
+        // replaces), `link` returns AlreadyExists when the final already exists — so a racing
+        // writer (or a prior upload) is correctly reported as `false`, and metrics/novel-byte
+        // accounting count each object exactly once.
+        let result = match tokio::fs::hard_link(&tmp, &path).await {
             Ok(()) => Ok(true),
-            Err(_) if tokio::fs::try_exists(&path).await.unwrap_or(false) => {
-                let _ = tokio::fs::remove_file(&tmp).await;
-                Ok(false)
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
             Err(e) => Err(e.into()),
-        }
+        };
+        let _ = tokio::fs::remove_file(&tmp).await; // best-effort: never leak the temp
+        result
     }
 
     async fn head(&self, key: &MerkleHash) -> Result<Option<ObjectMeta>> {
