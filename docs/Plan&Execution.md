@@ -13,7 +13,7 @@ Companion docs: [`DEVLOG.md`](DEVLOG.md) (per-iteration narrative), [`DEPLOYMENT
 | ⬜ | Not started |
 | ❄️ | Deferred / blocked (reason noted) |
 
-_Last updated: 2026-06-15 (after loop iteration 2)._
+_Last updated: 2026-06-15 (after loop iteration 3)._
 
 ---
 
@@ -25,11 +25,13 @@ Two independent stacks. Review/merge each chain in order.
 |----|-------|------|--------|
 | #1 | harden(sec): bound term ranges + fail-closed token RNG (2 HIGH) | `main` | 🔵 open |
 | #3 | harden(sec) iter2: bounded ranged reads + TOCTOU-safe GC | `#1` | 🔵 open (stacked) |
+| #5 | harden(sec) iter3: verify file_hash commits to terms | `#3` | 🔵 open (stacked) |
 | #2 | feat(nixos): services.xetd + 1Password(opnix)/Ceph | `main` | 🔵 open |
 | #4 | feat(xetfs): mount CLI + services.xetfs (client half) | `#2` | 🔵 open (stacked) |
+| #6 | feat(templates): three-machine flake templates | `#4` | 🔵 open (stacked) |
 
-**Next merge action (human):** review/merge `#1 → #3`, then `#2 → #4`. After merge, mark the
-corresponding 🔵 rows below as ✅.
+**Next merge action (human):** review/merge the security chain `#1 → #3 → #5`, then the
+deployment chain `#2 → #4 → #6`. After merge, mark the corresponding 🔵 rows below as ✅.
 
 ---
 
@@ -75,7 +77,7 @@ Findings from the rolling audit. Severity from the original review of `main@0b28
 | LOW | `get_range` reads whole object per request (mem/IO amp) | LOW | 🔵 | PR #3 (seek + read_exact) |
 | MED | GC TOCTOU → can orphan a live file | MED | 🔵 | PR #3 (single-lock root+evict) |
 | — | footer-offset poison via `POST /xorbs` (hypothesis) | — | ✅ | Verified **negative** — fork gate already blocks it |
-| MED | `register_file` doesn't verify `file_hash` (content poisoning) | MED | ⬜ | needs per-xorb chunk-hash storage; lands with `mdb_shard` |
+| MED | `register_file` doesn't verify `file_hash` (content poisoning) | MED | 🔵 | PR #5 — server recomputes file hash from terms' chunks, rejects mismatch |
 | MED | local-fs presign is unsigned/non-expiring (doc says HMAC) | MED | ❄️ | deferred: capability-URL = auth-model rework (`auth_mw` + test rework) |
 | LOW | no TLS (cleartext bearer) | LOW | ⬜ | deployment: front with TLS proxy (doc'd in DEPLOYMENT.md) |
 
@@ -97,7 +99,7 @@ Findings from the rolling audit. Severity from the original review of `main@0b28
 | Ceph plug-and-play runbook | 🔵 | PR #2 `docs/DEPLOYMENT.md` |
 | `xetfs` mount CLI (`xetfs --server … [--rw] <mnt>`) | 🔵 | PR #4 `crates/xetfs/src/main.rs` |
 | `services.xetfs` mount module (+ `XETD_TOKEN` from 1Password) | 🔵 | PR #4 `nixos/xetfs.nix` |
-| **Three flake templates** (`nix flake init -t …#{server,client,demo}`) | ⬜ | see §E |
+| **Three flake templates** (`nix flake init -t …#{gateway,client,demo}`) | 🔵 | PR #6 — see §E |
 | **`dejaveph` umbrella CLI** (`doctor`, `bootstrap-ceph`, `mount`) | ⬜ | kills manual Ceph/flag steps |
 | `/healthz` + `--ready` semantics for `systemctl` | ⬜ | "is it working?" in one command |
 | opnix template that *creates* the RGW item from `radosgw-admin` | ⬜ | closes the manual copy-paste gap |
@@ -139,10 +141,10 @@ Roles (collapsible to 1 box for a demo: `gateway`+`storage`, or just `local-fs`)
 
 | Role | Host (suggested) | Runs | Template | Status |
 |---|---|---|---|---|
-| `storage` | `ceph.home.arpa` | Ceph MON/OSD/RGW → bucket `dejaveph-xorbs` | `templates/storage` | ⬜ |
-| `gateway` | `dejaveph.home.arpa` | `xetd` (s3 backend, tokens) + TLS proxy + opnix | `templates/gateway` | ⬜ |
-| `client` | laptop / node | `services.xetfs` (Linux) or macOS app | `templates/client` | ⬜ |
-| `demo` | one box | `xetd` local-fs + a mount, zero secrets | `templates/demo` | ⬜ |
+| `storage` | `ceph.home.arpa` | Ceph MON/OSD/RGW → bucket `dejaveph-xorbs` | (BYO — single-node `cephadm`) | ⬜ |
+| `gateway` | `dejaveph.home.arpa` | `xetd` (s3 backend, tokens) + TLS proxy + opnix | `templates/gateway` | 🔵 PR #6 |
+| `client` | laptop / node | `services.xetfs` (Linux) or macOS app | `templates/client` | 🔵 PR #6 |
+| `demo` | one box | `xetd` local-fs + a mount, zero secrets | `templates/demo` | 🔵 PR #6 |
 
 Deliverable: `flake.nix` `templates.{storage,gateway,client,demo}` so a user runs
 `nix flake init -t github:SEBK4C/Dejaveph#gateway` and edits ~6 lines.
@@ -151,7 +153,7 @@ Deliverable: `flake.nix` `templates.{storage,gateway,client,demo}` so a user run
 
 ## F. Quality-of-life backlog (cheapest first)
 
-- ⬜ Flake templates (§E) — makes deploy copy-paste.
+- 🔵 Flake templates (§E) — makes deploy copy-paste. (PR #6)
 - ⬜ `dejaveph` umbrella CLI (`doctor`/`bootstrap-ceph`/`mount`) — one verb vs five flags.
 - ✅ Sane defaults wired (port 9777, path-style RGW, `dejaveph-xorbs`, `home.arpa`).
 - ⬜ Local-fs first-run with zero secrets.
@@ -199,3 +201,7 @@ logging it in DEVLOG.md; reflect each result here.
   Shipped NixOS `services.xetd` + opnix/Ceph deployment + docs. PRs #1, #2.
 - **2026-06-15 · Iteration 2** — Resource/concurrency angle: bounded `get_range`, TOCTOU-safe GC.
   Added the `xetfs` mount CLI + `services.xetfs` module (client half) with e2e smoke. PRs #3, #4.
+- **2026-06-15 · Iteration 3** — Content-integrity angle: `register_file` recomputes the file
+  hash from the terms' chunks and rejects mismatches (content-poisoning MEDIUM). Shipped the
+  three-machine flake templates (gateway/client/demo). Full e2e (incl. m3 write-back) green.
+  PRs #5, #6.
