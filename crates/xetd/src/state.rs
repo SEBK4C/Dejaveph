@@ -33,14 +33,15 @@ impl Metrics {
     }
 }
 
-/// Per-xorb index entry: the compressed-boundary offsets (chunk range → byte range) and the
-/// uncompressed offsets, captured from the validated footer at upload time (`Prompt.md` §6.2).
-#[allow(dead_code)] // boundary/unpacked offsets feed reconstruction (the next M0 step)
+/// Per-xorb index entry: the compressed-boundary offsets (chunk range → byte range) captured
+/// from the validated footer at upload time (`Prompt.md` §6.2).
 pub struct XorbMeta {
+    #[allow(dead_code)]
     pub num_chunks: u32,
     /// Compressed end offset of each chunk within the serialized xorb.
     pub boundary_offsets: Vec<u32>,
     /// Uncompressed cumulative end offset of each chunk.
+    #[allow(dead_code)]
     pub unpacked_offsets: Vec<u32>,
 }
 
@@ -54,10 +55,28 @@ impl XorbMeta {
     }
 }
 
+/// One reconstruction term: a contiguous chunk-index range `[start, end)` within one xorb.
+pub struct Term {
+    pub xorb: MerkleHash,
+    pub start: u32,
+    pub end: u32,
+    pub unpacked_length: u64,
+}
+
+/// A registered file: its total size and ordered reconstruction terms.
+pub struct FileRecord {
+    #[allow(dead_code)]
+    pub total_size: u64,
+    pub terms: Vec<Term>,
+}
+
 /// Mutable metadata. Replaced by the SQLite index store in a later milestone.
 #[derive(Default)]
 pub struct Index {
     pub xorbs: HashMap<MerkleHash, XorbMeta>,
+    pub files: HashMap<MerkleHash, FileRecord>,
+    /// VFS catalog: (volume, path) → file_hash (`Prompt.md` §9.1).
+    pub catalog: HashMap<(String, String), MerkleHash>,
 }
 
 impl Index {
@@ -70,14 +89,18 @@ pub struct AppState {
     pub blob: Arc<dyn BlobStore>,
     pub index: Mutex<Index>,
     pub metrics: Metrics,
+    /// This server's externally reachable base URL (e.g. `http://127.0.0.1:8080`), used to build
+    /// `fetch_info` URLs in reconstruction responses.
+    pub base_url: String,
 }
 
 impl AppState {
-    pub fn new(blob: Arc<dyn BlobStore>) -> Arc<Self> {
+    pub fn new(blob: Arc<dyn BlobStore>, base_url: String) -> Arc<Self> {
         Arc::new(Self {
             blob,
             index: Mutex::new(Index::default()),
             metrics: Metrics::default(),
+            base_url,
         })
     }
 }

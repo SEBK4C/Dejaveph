@@ -17,7 +17,7 @@ crates/
 vendor/xet-core/                # git submodule: SEBK4C/xet-core @ b1374f5 (path-dep'd)
 ```
 
-**Real vs stub today:** conformance passes (4/4 vectors against the fork). On the server, `POST /xorbs` (the real integrity gate via `XorbObject::validate_xorb_object` + idempotency), `GET /xorb-data` (inclusive ranged serving), and `/admin/test/metric` are implemented over a local-fs `BlobStore` (`crates/xetd/src/{blob,state}.rs`); `GET /reconstructions`, `GET /chunks`, and `POST /shards` still return `501`. `xet-agent`/`xetfs` (ingest/reconstruct/mount) remain `todo!()`. Next M0 step: the reconstruction endpoint + the agent round-trip, then de-stub `m0_core_cas.rs`. Keep this file current as code lands.
+**Real vs stub today:** conformance passes (4/4 vectors) and the **M0 ingest→reconstruct round-trip works** (`m0_core_cas` test, byte-identical, multi-xorb). Server (`crates/xetd/src/{main,blob,state}.rs`): `POST /xorbs` (real integrity gate via `XorbObject::validate_xorb_object` + idempotency), `POST /files` (M0-internal JSON registration: file_hash → terms; validates referenced xorbs exist), `GET /reconstructions` (terms + ranged `fetch_info`), `GET /xorb-data` (inclusive ranged serving), `/admin/test/metric`. `xet-agent` does real chunking (`Chunker`) → xorb pack/serialize/upload → register, and reconstruct = fetch ranges → `deserialize_chunk` → concat. Still stub/501: `GET /chunks` (global dedup, M1), `POST /shards` (binary mdb_shard for stock-client interop), `xetfs` (mount, M2), three-tier client dedup. `POST /files` is an M0-internal stand-in for the binary shard. Keep this file current as code lands.
 
 ## What this builds
 

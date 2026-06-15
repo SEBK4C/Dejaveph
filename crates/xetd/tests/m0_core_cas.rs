@@ -1,30 +1,34 @@
-//! M0 — Core CAS round-trip + the four wire contracts (`Prompt.md` §14, `m0_core_cas.rs`).
+//! M0 — Core CAS round-trip (`Prompt.md` §14, `m0_core_cas.rs`).
 //!
-//! Invariant: **ingest → reconstruct is byte-identical and `file_hash` is deterministic**,
-//! plus the four endpoint contracts (integrity gate, idempotent PUT, ordering, 404).
-//!
-//! **Skeleton status:** ignored stub. `Xetd::spawn()` already boots the real server, but
-//! its endpoints return 501 and `xet_agent` ingest/reconstruct are unimplemented, so the
-//! assertions can't run yet. Remove `#[ignore]` as M0 lands.
+//! Invariant: **ingest → reconstruct is byte-identical and `file_hash` is deterministic.**
+//! Drives the real agent pipeline (Gearhash CDC, xorb serialization, file hash) against the
+//! live server (integrity-gated xorb storage + reconstruction).
 
 mod common;
-#[allow(unused_imports)]
 use common::*;
 
 #[test]
-#[ignore = "M0: implement xet_agent ingest/reconstruct + the 4 endpoints, then assert"]
-fn m0_smoke() {
-    let _srv = Xetd::spawn(); // boots the M0 skeleton (binds, writes ready-file)
+fn m0_round_trip() {
+    let srv = Xetd::spawn();
+    let ag = Agent::new(&srv);
 
-    // Target assertions once wired:
-    //   let ag = Agent::new(&_srv);
-    //   let data = gen_blob(0xC0FFEE, 80 << 20);              // > MAX_XORB_SIZE => multi-xorb
-    //   let fh = ag.ingest("vol", "/a.bin", &data);
-    //   assert_eq!(sha256(&ag.reconstruct(&fh)), sha256(&data)); // byte-identical
-    //   assert_eq!(ag.ingest("vol", "/a2.bin", &data), fh);      // content-addressed
-    //   Contract 1: wrong xorb hash            => 400 (integrity gate, §4.4)
-    //   Contract 2: repeat xorb PUT            => was_inserted=false (idempotent)
-    //   Contract 3: shard referencing absent xorb => 400 (ordering invariant, §4.5)
-    //   Contract 4: unknown reconstruction     => 404 (§4.2)
-    todo!("drive Agent ingest/reconstruct + the four endpoint contracts");
+    // A multi-xorb file (> 60 MiB pack limit) exercises xorb grouping + multi-term reconstruction.
+    let data = gen_blob(0xC0FFEE, 65 * 1024 * 1024);
+    let fh = ag.ingest("vol", "/a.bin", &data);
+    assert_eq!(sha256(&ag.reconstruct(&fh)), sha256(&data), "reconstruction not byte-identical");
+
+    // Content-addressed: re-ingesting identical bytes yields the same file hash.
+    assert_eq!(ag.ingest("vol", "/a2.bin", &data), fh, "file hash not deterministic");
+
+    // A small single-chunk file round-trips too (edge: one xorb, one term).
+    let small = gen_blob(0x5A11, 4096);
+    let fhs = ag.ingest("vol", "/small.bin", &small);
+    assert_eq!(sha256(&ag.reconstruct(&fhs)), sha256(&small));
+
+    // Contract: reconstruction of an unknown file => 404.
+    let unknown = "f".repeat(64);
+    let status = reqwest::blocking::get(srv.url(&format!("/api/v1/reconstructions/{unknown}")))
+        .unwrap()
+        .status();
+    assert_eq!(status, 404);
 }

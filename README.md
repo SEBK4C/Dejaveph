@@ -4,14 +4,14 @@ A self-hostable storage server that speaks the **Xet protocol** (`XET-BLAKE3-GEA
 
 This repo builds on the vendored **[`SEBK4C/xet-core`](https://github.com/SEBK4C/xet-core)** fork (a fork of `huggingface/xet-core`) for byte-for-byte format conformance. The full design lives in [`Prompt.md`](Prompt.md); the architecture map and the spec→fork crate mapping live in [`CLAUDE.md`](CLAUDE.md).
 
-> **Status: early implementation.** The protocol **conformance gate passes** (the server's hashing agrees with stock xet-core). The Core CAS data path (M0) is in progress — the server boots and routes the four CAS endpoints, which currently return `501` until wired.
+> **Status: early implementation.** The protocol **conformance gate passes** (the server's hashing agrees with stock xet-core) and the **Core CAS ingest→reconstruct round-trip works** end-to-end (chunk → xorb → integrity-gated store → reconstruct, byte-identical). Remaining M0 work: the binary `mdb_shard` upload (`/shards`, for stock-client interop) and global dedup (`/chunks`).
 
 ## What works today
 
 | Stage | Status |
 |---|---|
 | **conformance** (protocol vectors) | ✅ 4/4 hash vectors pass against the real fork; `reference_objects` `#[ignore]` (network) |
-| **M0** Core CAS (local-fs) | 🚧 in progress — `POST /xorbs` integrity gate + idempotency, local-fs `BlobStore`, ranged `GET /xorb-data`, live metrics. Reconstruction / shards still `501` |
+| **M0** Core CAS (local-fs) | 🟢 ingest→reconstruct round-trip working (byte-identical, multi-xorb); integrity gate, idempotency, ranged serving, metrics. Binary `/shards` + global dedup `/chunks` pending |
 | **M1** Dedup · **M2** RO VFS · **M3** Writable VFS · **M4** Ceph/S3 · **M5** Operate | ⏳ planned (see `Prompt.md` §15) |
 
 ## Reproduce it yourself
@@ -73,9 +73,12 @@ curl -s http://127.0.0.1:8080/admin/test/metric/xorb_puts
 # 0
 
 curl -s -o /dev/null -w '%{http_code}\n' \
-  http://127.0.0.1:8080/api/v1/reconstructions/deadbeef
-# 501   (M0 in progress)
+  "http://127.0.0.1:8080/api/v1/reconstructions/$(printf 'f%.0s' {1..64})"
+# 404   (reconstruction is live; this hash is just unknown)
 ```
+
+The full ingest→reconstruct round-trip is exercised by `cargo test --test m0_core_cas`
+(it drives the real agent: chunk → xorb upload → register → reconstruct → byte-compare).
 
 ### Run the whole suite
 

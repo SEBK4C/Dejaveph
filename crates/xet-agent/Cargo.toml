@@ -14,3 +14,6 @@ path = "src/lib.rs"
 # (`xet_core::deduplication`, `xet_core::cas_client`, `xet_core::file_reconstruction`).
 xet-core-facade = { workspace = true }
 anyhow = { workspace = true }
+# Sync HTTP client for the ingest/reconstruct data path (loopback http; no TLS backend).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+serde_json = { workspace = true }

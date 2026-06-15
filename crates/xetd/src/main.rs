@@ -1,24 +1,29 @@
 //! `xetd` — self-hosted Xet CAS server (`Prompt.md` §4).
 //!
-//! M0 status: the xorb data path is real — `POST /xorbs` runs the integrity gate
-//! (recompute Merkle root == claimed hash) and stores to a `BlobStore`, and
-//! `GET /xorb-data` serves ranged bytes. Reconstruction, global dedup, and shard
-//! registration are still `501` and land in the next M0 steps.
+//! M0 status: the xorb data path and a working reconstruction round-trip are real.
+//! `POST /xorbs` runs the integrity gate and stores to a `BlobStore`; `POST /files`
+//! registers a file's reconstruction terms; `GET /reconstructions` returns terms +
+//! ranged `fetch_info`; `GET /xorb-data` serves the bytes. Global dedup (`/chunks`)
+//! and binary shard upload (`/shards`) are still `501`.
+//!
+//! `POST /files` is an M0-internal JSON registration (file_hash → terms). The binary
+//! `mdb_shard` wire format that stock `hf-xet` uses is a later refinement.
 
 mod blob;
 mod state;
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Path as AxPath, State},
+    extract::{DefaultBodyLimit, Path as AxPath, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use clap::{Parser, ValueEnum};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::atomic::Ordering::Relaxed;
 use tracing_subscriber::EnvFilter;
@@ -26,15 +31,16 @@ use xet_core::cas_object::XorbObject;
 use xet_core::merklehash::DataHash;
 
 use crate::blob::{BlobStore, LocalFsBlobStore};
-use crate::state::AppState;
+use crate::state::{AppState, FileRecord, Term};
+
+/// Max accepted request body. Xorbs are ≤ `MAX_XORB_SIZE` (64 MiB); allow headroom.
+const MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Parser, Debug)]
 #[command(name = "xetd", about = "Self-hosted Xet CAS server")]
 struct Args {
-    /// Bind address. `127.0.0.1:0` picks an ephemeral port (printed to --ready-file).
     #[arg(long, default_value = "127.0.0.1:0")]
     listen: String,
-    /// Server data directory (staging, scratch, default blob root).
     #[arg(long)]
     data_dir: PathBuf,
     /// Index DB path (SQLite, §6). Reserved — M0 uses an in-memory index.
@@ -46,7 +52,6 @@ struct Args {
     auth: Auth,
     #[arg(long, value_enum, default_value_t = Backend::LocalFs)]
     backend: Backend,
-    /// BlobStore root for the local-fs backend (§5.3). Defaults to `<data-dir>/blobs`.
     #[arg(long)]
     blob_root: Option<PathBuf>,
     #[arg(long)]
@@ -55,10 +60,8 @@ struct Args {
     s3_bucket: Option<String>,
     #[arg(long, default_value_t = false)]
     s3_path_style: bool,
-    /// Enable the `/admin/test/*` control surface. Never enable in production.
     #[arg(long, default_value_t = false)]
     test_hooks: bool,
-    /// File to atomically publish `http://<bound-addr>` to once listening.
     #[arg(long)]
     ready_file: Option<PathBuf>,
 }
@@ -94,17 +97,19 @@ async fn main() -> anyhow::Result<()> {
         }
         Backend::S3 => anyhow::bail!("s3 backend not implemented yet (M4)"),
     };
-    let state = AppState::new(blob);
     tracing::info!(
         backend = ?args.backend, auth = ?args.auth, durability = ?args.durability,
         "xetd starting"
     );
 
-    let app = router(args.test_hooks, state);
-
+    // Bind first so the bound address can seed the reconstruction `fetch_info` base URL.
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     let addr: SocketAddr = listener.local_addr()?;
+    let base_url = format!("http://{addr}");
     tracing::info!(%addr, "listening");
+
+    let state = AppState::new(blob, base_url);
+    let app = router(args.test_hooks, state);
 
     if let Some(ready) = args.ready_file.as_ref() {
         let tmp = ready.with_extension("tmp");
@@ -122,6 +127,7 @@ fn router(test_hooks: bool, state: Arc<AppState>) -> Router {
         .route("/api/v1/chunks/{namespace}/{chunk_hash}", get(global_dedup)) // §4.3
         .route("/api/v1/xorbs/{namespace}/{xorb_hash}", post(put_xorb)) // §4.4
         .route("/api/v1/shards", post(put_shard)) // §4.5
+        .route("/api/v1/files", post(register_file)) // M0-internal file registration
         .route("/api/v1/xorb-data/{xorb_hash}", get(xorb_data)); // §4.6
 
     if test_hooks {
@@ -133,12 +139,119 @@ fn router(test_hooks: bool, state: Arc<AppState>) -> Router {
             .route("/admin/test/gc", post(test_noop))
             .route("/admin/test/scrub", post(test_noop));
     }
-    app.with_state(state)
+    app.layer(DefaultBodyLimit::max(MAX_BODY_BYTES)).with_state(state)
 }
 
-/// §4.4 — upload a serialized xorb. Integrity gate: the recomputed Merkle root must equal
-/// the `{xorb_hash}` in the URL, else `400`. Idempotent: a re-upload returns
-/// `was_inserted: false`.
+// ---------------------------------------------------------------------------
+// Reconstruction wire types (§4.2). `range` is chunk-index, end-EXCLUSIVE;
+// `url_range` is an HTTP byte range, end-INCLUSIVE. Do not conflate them.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone, Copy)]
+struct ChunkRange {
+    start: u32,
+    end: u32,
+}
+#[derive(Serialize, Clone, Copy)]
+struct ByteRange {
+    start: u64,
+    end: u64,
+}
+#[derive(Serialize)]
+struct ReconTerm {
+    hash: String,
+    unpacked_length: u64,
+    range: ChunkRange,
+}
+#[derive(Serialize)]
+struct FetchInfo {
+    range: ChunkRange,
+    url: String,
+    url_range: ByteRange,
+}
+#[derive(Serialize)]
+struct ReconResponse {
+    offset_into_first_range: u64,
+    terms: Vec<ReconTerm>,
+    fetch_info: HashMap<String, Vec<FetchInfo>>,
+}
+
+#[derive(Deserialize)]
+struct RegisterTerm {
+    xorb: String,
+    start: u32,
+    end: u32,
+    unpacked_length: u64,
+}
+#[derive(Deserialize)]
+struct RegisterFile {
+    file_hash: String,
+    total_size: u64,
+    terms: Vec<RegisterTerm>,
+    volume: Option<String>,
+    path: Option<String>,
+}
+
+/// §4.2 — return a file's reconstruction: ordered terms + per-xorb ranged `fetch_info`.
+async fn reconstruct(State(st): State<Arc<AppState>>, AxPath(file_hash_hex): AxPath<String>) -> Response {
+    let Ok(fh) = DataHash::from_hex(&file_hash_hex) else {
+        return (StatusCode::BAD_REQUEST, "malformed file hash").into_response();
+    };
+    let idx = st.index.lock().unwrap();
+    let Some(file) = idx.files.get(&fh) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let mut terms = Vec::with_capacity(file.terms.len());
+    let mut fetch_info: HashMap<String, Vec<FetchInfo>> = HashMap::new();
+    for t in &file.terms {
+        let Some(meta) = idx.xorbs.get(&t.xorb) else {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "term references unindexed xorb").into_response();
+        };
+        // chunk range [start, end) -> compressed byte range using stored end-offsets (§6.2).
+        let byte_start = if t.start == 0 { 0 } else { meta.boundary_offsets[(t.start - 1) as usize] as u64 };
+        let byte_end = meta.boundary_offsets[(t.end - 1) as usize] as u64 - 1; // inclusive
+        let xorb_hex = t.xorb.hex();
+        let range = ChunkRange { start: t.start, end: t.end };
+        terms.push(ReconTerm { hash: xorb_hex.clone(), unpacked_length: t.unpacked_length, range });
+        fetch_info.entry(xorb_hex.clone()).or_default().push(FetchInfo {
+            range,
+            url: format!("{}/api/v1/xorb-data/{}", st.base_url, xorb_hex),
+            url_range: ByteRange { start: byte_start, end: byte_end },
+        });
+    }
+    Json(ReconResponse { offset_into_first_range: 0, terms, fetch_info }).into_response()
+}
+
+/// Register a file's reconstruction terms (M0-internal). Every referenced xorb must already be
+/// uploaded (§4.5 ordering invariant) — else `400`.
+async fn register_file(State(st): State<Arc<AppState>>, Json(req): Json<RegisterFile>) -> Response {
+    let Ok(fh) = DataHash::from_hex(&req.file_hash) else {
+        return (StatusCode::BAD_REQUEST, "malformed file hash").into_response();
+    };
+    let mut idx = st.index.lock().unwrap();
+
+    let mut terms = Vec::with_capacity(req.terms.len());
+    for t in &req.terms {
+        let Ok(xorb) = DataHash::from_hex(&t.xorb) else {
+            return (StatusCode::BAD_REQUEST, "malformed xorb hash").into_response();
+        };
+        if !idx.xorbs.contains_key(&xorb) {
+            return (StatusCode::BAD_REQUEST, "term references an xorb that was not uploaded").into_response();
+        }
+        terms.push(Term { xorb, start: t.start, end: t.end, unpacked_length: t.unpacked_length });
+    }
+
+    let existed = idx.files.contains_key(&fh);
+    idx.files.insert(fh, FileRecord { total_size: req.total_size, terms });
+    if let (Some(v), Some(p)) = (req.volume, req.path) {
+        idx.catalog.insert((v, p), fh);
+    }
+    Json(json!({ "result": if existed { 0 } else { 1 } })).into_response()
+}
+
+/// §4.4 — upload a serialized xorb. Integrity gate: recomputed Merkle root must equal the
+/// `{xorb_hash}` in the URL, else `400`. Idempotent (`was_inserted`).
 async fn put_xorb(
     State(st): State<Arc<AppState>>,
     AxPath((_ns, hash_hex)): AxPath<(String, String)>,
@@ -148,7 +261,6 @@ async fn put_xorb(
         return (StatusCode::BAD_REQUEST, "malformed xorb hash").into_response();
     };
 
-    // Integrity gate: validate structure + recompute the hash, reject on mismatch.
     let info = {
         let mut cursor = std::io::Cursor::new(body.as_ref());
         match XorbObject::validate_xorb_object(&mut cursor, &hash) {
@@ -204,7 +316,6 @@ async fn xorb_data(
 }
 
 /// Parse an inclusive `bytes=START-END` range against `total`. Absent header ⇒ whole object.
-/// Returns `None` for an unsatisfiable/malformed range.
 fn parse_range(h: Option<&HeaderValue>, total: u64) -> Option<(u64, u64)> {
     let Some(h) = h else {
         return Some((0, total.saturating_sub(1)));
@@ -219,17 +330,13 @@ fn parse_range(h: Option<&HeaderValue>, total: u64) -> Option<(u64, u64)> {
     Some((start, end.min(total.saturating_sub(1))))
 }
 
-// --- Not yet implemented (next M0 steps). ---
+// --- Not yet implemented. ---
 
-/// §4.2 → terms + fetch_info.
-async fn reconstruct() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
-}
 /// §4.3 → keyed shard | 404.
 async fn global_dedup() -> StatusCode {
     StatusCode::NOT_IMPLEMENTED
 }
-/// §4.5 → referenced xorbs must exist; `{ result }`.
+/// §4.5 → binary mdb_shard upload (stock-client interop). M0 uses `POST /files` instead.
 async fn put_shard() -> StatusCode {
     StatusCode::NOT_IMPLEMENTED
 }
