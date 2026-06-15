@@ -86,10 +86,21 @@ impl BlobStore for LocalFsBlobStore {
     }
 
     async fn get_range(&self, key: &MerkleHash, start: u64, end: u64) -> Result<Bytes> {
-        let data = tokio::fs::read(self.path_for(key)).await?;
-        let lo = (start as usize).min(data.len());
-        let hi = (end as usize + 1).min(data.len());
-        Ok(Bytes::copy_from_slice(&data[lo..hi.max(lo)]))
+        // Read ONLY the requested span via seek — never the whole object. Reading the full
+        // (≤64 MiB) xorb per ranged request let a client amplify memory/IO with many small
+        // concurrent ranges; bounding the read to [start, end] caps it to the slice size.
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let mut f = tokio::fs::File::open(self.path_for(key)).await?;
+        let file_len = f.metadata().await?.len();
+        if start >= file_len {
+            return Ok(Bytes::new());
+        }
+        let last = end.min(file_len.saturating_sub(1)); // inclusive, clamped to EOF
+        let want = (last - start + 1) as usize;
+        f.seek(std::io::SeekFrom::Start(start)).await?;
+        let mut buf = vec![0u8; want];
+        f.read_exact(&mut buf).await?;
+        Ok(Bytes::from(buf))
     }
 
     async fn presign_get(&self, key: &MerkleHash, _ttl: Duration) -> Result<String> {

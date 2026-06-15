@@ -532,28 +532,34 @@ async fn test_noop() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
 
-/// Mark-and-sweep GC (§11.1): roots = every file's referenced xorbs; sweep the rest from the
-/// BlobStore and the index. (A grace period for in-flight uploads is a later refinement.)
+/// Mark-and-sweep GC (§11.1): roots = every file's referenced xorbs; sweep the rest.
+///
+/// TOCTOU-safe: the root set is computed AND the unreferenced xorbs are evicted from the index
+/// under a SINGLE lock acquisition. Because `register_file` rejects terms whose xorb is not in
+/// the index, removing a xorb from the index under this lock guarantees no concurrent register
+/// can newly reference a xorb we're about to delete — so GC can't orphan a live file. The async
+/// blob deletions run only after the index is consistent and the lock is released.
 async fn test_gc(State(st): State<Arc<AppState>>) -> Response {
-    let (referenced, all): (HashSet<DataHash>, Vec<DataHash>) = {
-        let idx = st.index.lock();
-        let mut refd = HashSet::new();
+    let to_delete: Vec<DataHash> = {
+        let mut idx = st.index.lock();
+        let mut referenced = HashSet::new();
         for f in idx.files.values() {
             for t in &f.terms {
-                refd.insert(t.xorb);
+                referenced.insert(t.xorb);
             }
         }
-        (refd, idx.xorbs.keys().copied().collect())
-    };
-    let mut swept = 0u64;
-    for x in all {
-        if !referenced.contains(&x) {
-            let _ = st.blob.delete(&x).await;
-            let mut idx = st.index.lock();
-            idx.xorbs.remove(&x);
-            idx.chunk_index.retain(|_, loc| loc.xorb != x);
-            swept += 1;
+        let unref: Vec<DataHash> =
+            idx.xorbs.keys().copied().filter(|x| !referenced.contains(x)).collect();
+        let unref_set: HashSet<DataHash> = unref.iter().copied().collect();
+        for x in &unref {
+            idx.xorbs.remove(x);
         }
+        idx.chunk_index.retain(|_, loc| !unref_set.contains(&loc.xorb));
+        unref
+    };
+    let swept = to_delete.len() as u64;
+    for x in &to_delete {
+        let _ = st.blob.delete(x).await; // index already consistent; a failed unlink only leaks bytes
     }
     Json(json!({ "swept": swept })).into_response()
 }
