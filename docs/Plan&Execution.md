@@ -13,7 +13,7 @@ Companion docs: [`DEVLOG.md`](DEVLOG.md) (per-iteration narrative), [`DEPLOYMENT
 | ⬜ | Not started |
 | ❄️ | Deferred / blocked (reason noted) |
 
-_Last updated: 2026-06-15 (after loop iteration 4)._
+_Last updated: 2026-06-15 (after loop iteration 5)._
 
 ---
 
@@ -27,12 +27,14 @@ Two independent stacks. Review/merge each chain in order.
 | #3 | harden(sec) iter2: bounded ranged reads + TOCTOU-safe GC | `#1` | 🔵 open (stacked) |
 | #5 | harden(sec) iter3: verify file_hash commits to terms | `#3` | 🔵 open (stacked) |
 | #7 | harden(sec) iter4: HMAC+TTL capability URL for /xorb-data | `#5` | 🔵 open (stacked) |
+| #8 | harden(sec) iter5: unique temp + hard-link publish (concurrent put) | `#7` | 🔵 open (stacked) |
 | #2 | feat(nixos): services.xetd + 1Password(opnix)/Ceph | `main` | 🔵 open |
 | #4 | feat(xetfs): mount CLI + services.xetfs (client half) | `#2` | 🔵 open (stacked) |
 | #6 | feat(templates): three-machine flake templates | `#4` | 🔵 open (stacked) |
 
-**Next merge action (human):** review/merge the security chain `#1 → #3 → #5 → #7`, then the
+**Next merge action (human):** review/merge the security chain `#1 → #3 → #5 → #7 → #8`, then the
 deployment chain `#2 → #4 → #6`. After merge, mark the corresponding 🔵 rows below as ✅.
+(`scripts/` QoL helpers — `dejaveph-doctor`, `bootstrap-ceph` — are already on `main`: ✅.)
 
 ---
 
@@ -80,12 +82,13 @@ Findings from the rolling audit. Severity from the original review of `main@0b28
 | — | footer-offset poison via `POST /xorbs` (hypothesis) | — | ✅ | Verified **negative** — fork gate already blocks it |
 | MED | `register_file` doesn't verify `file_hash` (content poisoning) | MED | 🔵 | PR #5 — server recomputes file hash from terms' chunks, rejects mismatch |
 | MED | local-fs presign is unsigned/non-expiring (doc says HMAC) | MED | 🔵 | PR #7 — BLAKE3-keyed MAC + TTL; `/xorb-data` = capability OR bearer |
+| MED | concurrent `put` of same novel xorb: corrupt object + double-count | MED | 🔵 | PR #8 — unique temp + hard-link publish |
 | LOW | no TLS (cleartext bearer) | LOW | ⬜ | deployment: front with TLS proxy (doc'd in DEPLOYMENT.md) |
 
 ### Future audit angles (queued, ~1 per iteration)
 - ⬜ Unbounded allocation / decompression bomb on the reconstruct path.
 - ⬜ Volume/path catalog: no per-volume auth scoping (tokens are global).
-- ⬜ Idempotency-key / race conditions in concurrent `put_xorb` + GC.
+- [x] Idempotency / race in concurrent `put_xorb` — **done iter5 (PR #8)**; GC race done iter2.
 - ⬜ Fuzz the xorb footer parser + `parse_range` (cargo-fuzz / arbitrary).
 
 ---
@@ -101,7 +104,7 @@ Findings from the rolling audit. Severity from the original review of `main@0b28
 | `xetfs` mount CLI (`xetfs --server … [--rw] <mnt>`) | 🔵 | PR #4 `crates/xetfs/src/main.rs` |
 | `services.xetfs` mount module (+ `XETD_TOKEN` from 1Password) | 🔵 | PR #4 `nixos/xetfs.nix` |
 | **Three flake templates** (`nix flake init -t …#{gateway,client,demo}`) | 🔵 | PR #6 — see §E |
-| **`dejaveph` umbrella CLI** (`doctor`, `bootstrap-ceph`, `mount`) | ⬜ | kills manual Ceph/flag steps |
+| **`dejaveph` helpers** (`doctor`, `bootstrap-ceph`) | ✅ | `scripts/` on `main` — bash, not yet a unified Rust CLI |
 | `/healthz` + `--ready` semantics for `systemctl` | ⬜ | "is it working?" in one command |
 | opnix template that *creates* the RGW item from `radosgw-admin` | ⬜ | closes the manual copy-paste gap |
 | qemu / Nix-VM e2e test harness | ❄️ | backlog; needs `nix` on a builder (this host has none) |
@@ -155,7 +158,8 @@ Deliverable: `flake.nix` `templates.{storage,gateway,client,demo}` so a user run
 ## F. Quality-of-life backlog (cheapest first)
 
 - 🔵 Flake templates (§E) — makes deploy copy-paste. (PR #6)
-- ⬜ `dejaveph` umbrella CLI (`doctor`/`bootstrap-ceph`/`mount`) — one verb vs five flags.
+- ✅ `dejaveph-doctor` + `bootstrap-ceph` helper scripts — `scripts/` on `main` (iter5).
+- ⬜ Fold the helpers into a single `dejaveph` Rust CLI (`doctor`/`bootstrap-ceph`/`mount`).
 - ✅ Sane defaults wired (port 9777, path-style RGW, `dejaveph-xorbs`, `home.arpa`).
 - ⬜ Local-fs first-run with zero secrets.
 - ⬜ Meaningful health/ready endpoint.
@@ -210,3 +214,7 @@ logging it in DEVLOG.md; reflect each result here.
   TTL-bounded capability URL (capability OR bearer), closing the last MEDIUM and the §5.4/§10
   doc-vs-code gap. `cap` unit tests + `m4_capability` + full e2e green. PR #7. **All HIGH+MEDIUM
   audit findings now patched** (on branches).
+- **2026-06-15 · Iteration 5** — Blob write-path concurrency: unique temp name + `hard_link`
+  publish fixes a corrupt-object + double-count race on concurrent identical uploads. New
+  `m0_concurrent_put` (24-way race) + full e2e green. PR #8. QoL: shipped `dejaveph-doctor` +
+  `bootstrap-ceph` helper scripts to `main`.
