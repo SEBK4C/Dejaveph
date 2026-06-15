@@ -71,6 +71,29 @@ impl Xetd {
         Self { base, data, blob_root, child }
     }
 
+    /// Spawn `xetd` with the S3 backend (requires a binary built with `--features s3`).
+    pub fn spawn_s3(endpoint: &str, bucket: &str, key: &str, secret: &str) -> Self {
+        let data = TempDir::new().unwrap();
+        let ready = data.path().join("ready");
+        let child = Command::new(env!("CARGO_BIN_EXE_xetd"))
+            .arg("--listen").arg("127.0.0.1:0")
+            .arg("--data-dir").arg(data.path())
+            .arg("--db").arg(data.path().join("index.sqlite"))
+            .arg("--backend").arg("s3")
+            .arg("--s3-endpoint").arg(endpoint)
+            .arg("--s3-bucket").arg(bucket)
+            .arg("--s3-path-style")
+            .arg("--auth").arg("loopback")
+            .arg("--test-hooks")
+            .arg("--ready-file").arg(&ready)
+            .env("AWS_ACCESS_KEY_ID", key)
+            .env("AWS_SECRET_ACCESS_KEY", secret)
+            .spawn()
+            .expect("spawn xetd (s3)");
+        let base = await_ready(&ready);
+        Self { base, data, blob_root: PathBuf::new(), child }
+    }
+
     pub fn url(&self, p: &str) -> String {
         format!("{}{}", self.base, p)
     }

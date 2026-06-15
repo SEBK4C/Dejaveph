@@ -15,7 +15,8 @@ This repo builds on the vendored **[`SEBK4C/xet-core`](https://github.com/SEBK4C
 | **M1** Dedup | 🟢 edit-locality dedup working — a 1-byte mid-file edit re-uploads only the perturbed chunks (client resolves chunks via `/chunks`, references existing xorbs) |
 | **M2** Read-only VFS | 🟢 FUSE mount working — files read through the mount match the originals; `readdir` + partial reads (needs `/dev/fuse` + setuid `fusermount`) |
 | **M3** Writable VFS | 🟢 write-back-on-close working — an in-place edit yields the same `file_hash` as a full ingest (`incremental == full`); truncate/append. Crash-recovery + GC refcounts pending |
-| **M4** Ceph/S3 · **M5** Operate | ⏳ planned (see `Prompt.md` §15) |
+| **M4** Ceph/S3 | 🟡 S3/RGW `BlobStore` implemented (behind `--features s3`) + presigned ranged GETs; reconstruction points clients straight at the object store. Live MinIO/RGW test is `#[ignore]` (needs Docker) |
+| **M5** Operate | ⏳ planned (see `Prompt.md` §15) |
 
 ## Reproduce it yourself
 

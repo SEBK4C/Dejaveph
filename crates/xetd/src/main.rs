@@ -10,6 +10,8 @@
 //! `mdb_shard` wire format that stock `hf-xet` uses is a later refinement.
 
 mod blob;
+#[cfg(feature = "s3")]
+mod s3;
 mod state;
 
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -106,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
             let root = args.blob_root.clone().unwrap_or_else(|| args.data_dir.join("blobs"));
             Arc::new(LocalFsBlobStore::new(root, base_url.clone()))
         }
-        Backend::S3 => anyhow::bail!("s3 backend not yet enabled; rebuild with --features s3"),
+        Backend::S3 => construct_s3(&args).await?,
     };
     let state = AppState::new(blob);
     let app = router(args.test_hooks, state);
@@ -119,6 +121,23 @@ async fn main() -> anyhow::Result<()> {
 
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(feature = "s3")]
+async fn construct_s3(args: &Args) -> anyhow::Result<Arc<dyn BlobStore>> {
+    use anyhow::Context;
+    let endpoint = args.s3_endpoint.clone().context("--s3-endpoint is required for the s3 backend")?;
+    let bucket = args.s3_bucket.clone().context("--s3-bucket is required for the s3 backend")?;
+    let access = std::env::var("AWS_ACCESS_KEY_ID").context("AWS_ACCESS_KEY_ID not set")?;
+    let secret = std::env::var("AWS_SECRET_ACCESS_KEY").context("AWS_SECRET_ACCESS_KEY not set")?;
+    Ok(Arc::new(
+        s3::S3BlobStore::new(&endpoint, &bucket, &access, &secret, args.s3_path_style).await?,
+    ))
+}
+
+#[cfg(not(feature = "s3"))]
+async fn construct_s3(_args: &Args) -> anyhow::Result<Arc<dyn BlobStore>> {
+    anyhow::bail!("s3 backend not enabled; rebuild with --features s3")
 }
 
 fn router(test_hooks: bool, state: Arc<AppState>) -> Router {

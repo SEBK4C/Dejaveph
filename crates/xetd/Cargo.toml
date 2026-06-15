@@ -21,6 +21,11 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# S3 / Ceph-RGW backend (M4) — opt-in so the default build (and the CI gate) stay lean.
+aws-sdk-s3 = { version = "1", optional = true }
+
+[features]
+s3 = ["dep:aws-sdk-s3"]
 
 [dev-dependencies]
 # E2E harness (tests/common): drives the real `xetd` binary + the xet-agent pipeline.
