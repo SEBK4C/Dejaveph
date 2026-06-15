@@ -17,7 +17,7 @@ crates/
 vendor/xet-core/                # git submodule: SEBK4C/xet-core @ b1374f5 (path-dep'd)
 ```
 
-**Real vs stub today:** `xetd` boots, binds `--listen`, and atomically publishes `http://<addr>` to `--ready-file` (the harness contract); the four CAS endpoints + `/admin/test/*` are routed but return `501`. The `xet_core` facade genuinely compiles against the fork. `xet-agent`/`xetfs` bodies and **every test assertion are `todo!()` / `#[ignore]` stubs** — landing M0 means filling these in (start at the endpoints in `crates/xetd/src/main.rs` and the agent pipeline). Keep this file current as code lands.
+**Real vs stub today:** conformance passes (4/4 vectors against the fork). On the server, `POST /xorbs` (the real integrity gate via `XorbObject::validate_xorb_object` + idempotency), `GET /xorb-data` (inclusive ranged serving), and `/admin/test/metric` are implemented over a local-fs `BlobStore` (`crates/xetd/src/{blob,state}.rs`); `GET /reconstructions`, `GET /chunks`, and `POST /shards` still return `501`. `xet-agent`/`xetfs` (ingest/reconstruct/mount) remain `todo!()`. Next M0 step: the reconstruction endpoint + the agent round-trip, then de-stub `m0_core_cas.rs`. Keep this file current as code lands.
 
 ## What this builds
 

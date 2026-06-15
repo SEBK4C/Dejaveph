@@ -1,0 +1,83 @@
+//! Server state: the immutable `BlobStore` plus the mutable in-memory index
+//! (xorb catalog, file reconstructions, VFS catalog) and metrics.
+//!
+//! M0 keeps the index in memory behind a `Mutex`; SQLite (`Prompt.md` §6) lands later.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
+
+use xet_core::cas_object::XorbObjectInfoV1;
+use xet_core::merklehash::MerkleHash;
+
+use crate::blob::BlobStore;
+
+/// Counters surfaced via `/admin/test/metric/{name}` (test-hooks only).
+#[derive(Default)]
+pub struct Metrics {
+    pub xorb_puts: AtomicU64,
+    pub novel_bytes: AtomicU64,
+    pub chunk_query_hit: AtomicU64,
+    pub chunk_query_miss: AtomicU64,
+}
+
+impl Metrics {
+    pub fn get(&self, name: &str) -> u64 {
+        match name {
+            "xorb_puts" => self.xorb_puts.load(Relaxed),
+            "novel_bytes" => self.novel_bytes.load(Relaxed),
+            "chunk_query_hit" => self.chunk_query_hit.load(Relaxed),
+            "chunk_query_miss" => self.chunk_query_miss.load(Relaxed),
+            _ => 0,
+        }
+    }
+}
+
+/// Per-xorb index entry: the compressed-boundary offsets (chunk range → byte range) and the
+/// uncompressed offsets, captured from the validated footer at upload time (`Prompt.md` §6.2).
+#[allow(dead_code)] // boundary/unpacked offsets feed reconstruction (the next M0 step)
+pub struct XorbMeta {
+    pub num_chunks: u32,
+    /// Compressed end offset of each chunk within the serialized xorb.
+    pub boundary_offsets: Vec<u32>,
+    /// Uncompressed cumulative end offset of each chunk.
+    pub unpacked_offsets: Vec<u32>,
+}
+
+impl XorbMeta {
+    pub fn from_info(info: &XorbObjectInfoV1) -> Self {
+        Self {
+            num_chunks: info.num_chunks,
+            boundary_offsets: info.chunk_boundary_offsets.clone(),
+            unpacked_offsets: info.unpacked_chunk_offsets.clone(),
+        }
+    }
+}
+
+/// Mutable metadata. Replaced by the SQLite index store in a later milestone.
+#[derive(Default)]
+pub struct Index {
+    pub xorbs: HashMap<MerkleHash, XorbMeta>,
+}
+
+impl Index {
+    pub fn put_xorb(&mut self, hash: MerkleHash, info: &XorbObjectInfoV1) {
+        self.xorbs.entry(hash).or_insert_with(|| XorbMeta::from_info(info));
+    }
+}
+
+pub struct AppState {
+    pub blob: Arc<dyn BlobStore>,
+    pub index: Mutex<Index>,
+    pub metrics: Metrics,
+}
+
+impl AppState {
+    pub fn new(blob: Arc<dyn BlobStore>) -> Arc<Self> {
+        Arc::new(Self {
+            blob,
+            index: Mutex::new(Index::default()),
+            metrics: Metrics::default(),
+        })
+    }
+}

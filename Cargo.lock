@@ -3428,7 +3428,9 @@ name = "xetd"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "bytes",
  "clap",
  "hex",
  "reqwest 0.12.28",

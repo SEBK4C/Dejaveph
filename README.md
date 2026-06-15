@@ -11,7 +11,7 @@ This repo builds on the vendored **[`SEBK4C/xet-core`](https://github.com/SEBK4C
 | Stage | Status |
 |---|---|
 | **conformance** (protocol vectors) | ✅ 4/4 hash vectors pass against the real fork; `reference_objects` `#[ignore]` (network) |
-| **M0** Core CAS (local-fs) | 🚧 server CLI + HTTP routing + ready-file contract; endpoints are `501` stubs |
+| **M0** Core CAS (local-fs) | 🚧 in progress — `POST /xorbs` integrity gate + idempotency, local-fs `BlobStore`, ranged `GET /xorb-data`, live metrics. Reconstruction / shards still `501` |
 | **M1** Dedup · **M2** RO VFS · **M3** Writable VFS · **M4** Ceph/S3 · **M5** Operate | ⏳ planned (see `Prompt.md` §15) |
 
 ## Reproduce it yourself
