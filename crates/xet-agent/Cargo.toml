@@ -1,0 +1,16 @@
+[package]
+name = "xet-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Xet client/ingest pipeline (chunk -> hash -> dedup -> upload / reconstruct). M0 stub."
+
+[lib]
+name = "xet_agent"
+path = "src/lib.rs"
+
+[dependencies]
+# The fork's chunking/dedup/reconstruction reach us through the facade
+# (`xet_core::deduplication`, `xet_core::cas_client`, `xet_core::file_reconstruction`).
+xet-core-facade = { workspace = true }
+anyhow = { workspace = true }

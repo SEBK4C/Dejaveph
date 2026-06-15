@@ -1,0 +1,3 @@
+[submodule "vendor/xet-core"]
+	path = vendor/xet-core
+	url = https://github.com/SEBK4C/xet-core

@@ -1,0 +1,16 @@
+[package]
+name = "xet-core-facade"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Thin facade re-exporting the vendored SEBK4C/xet-core fork crates under the names the xetd spec (Prompt.md §13) uses. No logic — naming only."
+
+# Imported as `xet_core` so call sites read like the spec (e.g. `xet_core::cas_object`).
+[lib]
+name = "xet_core"
+path = "src/lib.rs"
+
+[dependencies]
+xet-core-structures = { workspace = true }
+xet-data = { workspace = true }
+xet-client = { workspace = true }

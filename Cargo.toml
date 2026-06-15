@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/xet-core",
+    "crates/xetd",
+    "crates/xet-agent",
+    "crates/xetfs",
+]
+# The vendored xet-core fork is its own workspace; never treat it as a member here.
+exclude = ["vendor"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+# --- Vendored SEBK4C/xet-core fork (git submodule at vendor/xet-core) ---
+# Path deps into the fork's workspace members. See CLAUDE.md for the spec->fork map.
+xet-core-structures = { path = "vendor/xet-core/xet_core_structures" }
+xet-data            = { path = "vendor/xet-core/xet_data" }
+xet-client          = { path = "vendor/xet-core/xet_client" }
+xet-runtime         = { path = "vendor/xet-core/xet_runtime" }
+
+# --- Local crates ---
+xet-core-facade = { path = "crates/xet-core" }   # lib name: xet_core
+xet-agent       = { path = "crates/xet-agent" }
+xetfs           = { path = "crates/xetfs" }
+
+# --- Third-party ---
+anyhow = "1"
+axum = "0.8"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
