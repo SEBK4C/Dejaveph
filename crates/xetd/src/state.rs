@@ -70,6 +70,13 @@ pub struct FileRecord {
     pub terms: Vec<Term>,
 }
 
+/// Where a chunk lives, for the global dedup index (`Prompt.md` §6.3).
+pub struct ChunkLoc {
+    pub xorb: MerkleHash,
+    pub index: u32,
+    pub unpacked_len: u32,
+}
+
 /// Mutable metadata. Replaced by the SQLite index store in a later milestone.
 #[derive(Default)]
 pub struct Index {
@@ -77,11 +84,29 @@ pub struct Index {
     pub files: HashMap<MerkleHash, FileRecord>,
     /// VFS catalog: (volume, path) → file_hash (`Prompt.md` §9.1).
     pub catalog: HashMap<(String, String), MerkleHash>,
+    /// Global dedup index: chunk_hash → location (`Prompt.md` §6.3).
+    pub chunk_index: HashMap<MerkleHash, ChunkLoc>,
 }
 
 impl Index {
     pub fn put_xorb(&mut self, hash: MerkleHash, info: &XorbObjectInfoV1) {
         self.xorbs.entry(hash).or_insert_with(|| XorbMeta::from_info(info));
+    }
+
+    /// Index every chunk of a freshly stored xorb into the global dedup index.
+    /// (M0/M1 index all chunks; §2.2 global-eligibility filtering arrives with the keyed-shard
+    /// dedup protocol.) The uncompressed offsets are cumulative end positions, so chunk `i`'s
+    /// length is `offset[i] - offset[i-1]`.
+    pub fn index_chunks(&mut self, xorb: MerkleHash, info: &XorbObjectInfoV1) {
+        let mut prev_end = 0u32;
+        for (i, h) in info.chunk_hashes.iter().enumerate() {
+            let end = info.unpacked_chunk_offsets[i];
+            let unpacked_len = end - prev_end;
+            prev_end = end;
+            self.chunk_index
+                .entry(*h)
+                .or_insert(ChunkLoc { xorb, index: i as u32, unpacked_len });
+        }
     }
 }
 

@@ -12,7 +12,8 @@ This repo builds on the vendored **[`SEBK4C/xet-core`](https://github.com/SEBK4C
 |---|---|
 | **conformance** (protocol vectors) | ✅ 4/4 hash vectors pass against the real fork; `reference_objects` `#[ignore]` (network) |
 | **M0** Core CAS (local-fs) | 🟢 ingest→reconstruct round-trip working (byte-identical, multi-xorb); integrity gate, idempotency, ranged serving, metrics. Binary `/shards` + global dedup `/chunks` pending |
-| **M1** Dedup · **M2** RO VFS · **M3** Writable VFS · **M4** Ceph/S3 · **M5** Operate | ⏳ planned (see `Prompt.md` §15) |
+| **M1** Dedup | 🚧 global dedup index + `GET /chunks` (server side); client edit-locality dedup pending |
+| **M2** RO VFS · **M3** Writable VFS · **M4** Ceph/S3 · **M5** Operate | ⏳ planned (see `Prompt.md` §15) |
 
 ## Reproduce it yourself
 

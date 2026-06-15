@@ -279,7 +279,11 @@ async fn put_xorb(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("blob store: {e}")).into_response(),
     };
     if inserted {
-        st.index.lock().unwrap().put_xorb(hash, &info);
+        {
+            let mut idx = st.index.lock().unwrap();
+            idx.put_xorb(hash, &info);
+            idx.index_chunks(hash, &info); // populate the global dedup index
+        }
         st.metrics.xorb_puts.fetch_add(1, Relaxed);
         st.metrics.novel_bytes.fetch_add(len, Relaxed);
     }
@@ -330,12 +334,32 @@ fn parse_range(h: Option<&HeaderValue>, total: u64) -> Option<(u64, u64)> {
     Some((start, end.min(total.saturating_sub(1))))
 }
 
+/// §4.3 — global dedup lookup. M0-internal JSON: where the chunk lives, or `404`. (The spec
+/// returns a binary keyed shard; that lands with the keyed-shard dedup protocol.)
+async fn global_dedup(
+    State(st): State<Arc<AppState>>,
+    AxPath((_ns, chunk_hex)): AxPath<(String, String)>,
+) -> Response {
+    let Ok(ch) = DataHash::from_hex(&chunk_hex) else {
+        return (StatusCode::BAD_REQUEST, "malformed chunk hash").into_response();
+    };
+    let hit = st.index.lock().unwrap().chunk_index.get(&ch).map(|loc| {
+        json!({ "xorb": loc.xorb.hex(), "chunk_index": loc.index, "unpacked_length": loc.unpacked_len })
+    });
+    match hit {
+        Some(body) => {
+            st.metrics.chunk_query_hit.fetch_add(1, Relaxed);
+            Json(body).into_response()
+        }
+        None => {
+            st.metrics.chunk_query_miss.fetch_add(1, Relaxed);
+            StatusCode::NOT_FOUND.into_response()
+        }
+    }
+}
+
 // --- Not yet implemented. ---
 
-/// §4.3 → keyed shard | 404.
-async fn global_dedup() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
-}
 /// §4.5 → binary mdb_shard upload (stock-client interop). M0 uses `POST /files` instead.
 async fn put_shard() -> StatusCode {
     StatusCode::NOT_IMPLEMENTED
