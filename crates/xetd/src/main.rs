@@ -200,13 +200,14 @@ async fn auth_mw(State(st): State<Arc<AppState>>, req: axum::extract::Request, n
     }
 }
 
-/// Opaque per-process bearer token (16 bytes from /dev/urandom). Real JWT issuance is a refinement.
+/// Opaque per-process bearer token (16 CSPRNG bytes). Real JWT issuance is a refinement.
+///
+/// Sourced from the `getrandom(2)` syscall, which does not depend on `/dev/urandom` being
+/// mounted/openable. We **abort** rather than serve a degraded (predictable) token: a
+/// guessable `tokens`-mode credential is an auth bypass, so failing closed is mandatory (HIGH-2).
 fn random_token(prefix: &str) -> String {
-    use std::io::Read;
     let mut buf = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut buf);
-    }
+    getrandom::fill(&mut buf).expect("CSPRNG (getrandom) unavailable — refusing to mint a weak token");
     let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
     format!("{prefix}-{hex}")
 }
@@ -289,8 +290,20 @@ async fn reconstruct(State(st): State<Arc<AppState>>, AxPath(file_hash_hex): AxP
                         bad = Some(StatusCode::INTERNAL_SERVER_ERROR);
                         break;
                     };
-                    let byte_start = if t.start == 0 { 0 } else { meta.boundary_offsets[(t.start - 1) as usize] as u64 };
-                    let byte_end = meta.boundary_offsets[(t.end - 1) as usize] as u64 - 1; // inclusive
+                    // Defensive: registration bounds the range, but never index raw — a stray bad
+                    // term must 500, not panic under this held Mutex (which would poison it).
+                    let byte_start = if t.start == 0 {
+                        0
+                    } else {
+                        match meta.boundary_offsets.get((t.start - 1) as usize) {
+                            Some(&o) => o as u64,
+                            None => { bad = Some(StatusCode::INTERNAL_SERVER_ERROR); break; }
+                        }
+                    };
+                    let byte_end = match t.end.checked_sub(1).and_then(|i| meta.boundary_offsets.get(i as usize)) {
+                        Some(&o) => o as u64 - 1, // inclusive
+                        None => { bad = Some(StatusCode::INTERNAL_SERVER_ERROR); break; }
+                    };
                     v.push(Resolved { xorb: t.xorb, start: t.start, end: t.end, unpacked: t.unpacked_length, byte_start, byte_end });
                 }
                 match bad {
@@ -338,8 +351,20 @@ async fn register_file(State(st): State<Arc<AppState>>, Json(req): Json<Register
         let Ok(xorb) = DataHash::from_hex(&t.xorb) else {
             return (StatusCode::BAD_REQUEST, "malformed xorb hash").into_response();
         };
-        if !idx.xorbs.contains_key(&xorb) {
+        let Some(meta) = idx.xorbs.get(&xorb) else {
             return (StatusCode::BAD_REQUEST, "term references an xorb that was not uploaded").into_response();
+        };
+        // Chunk-index range is end-EXCLUSIVE [start,end). Bound it to the xorb's actual chunk
+        // count so reconstruct() can never index boundary_offsets out of range. Without this an
+        // out-of-range (or end==0 underflow) term panics inside the held index Mutex, poisoning
+        // it and bricking every subsequent request (§4.2; HIGH-1).
+        let num_chunks = meta.boundary_offsets.len() as u32;
+        if t.start >= t.end || t.end > num_chunks {
+            return (
+                StatusCode::BAD_REQUEST,
+                "term chunk range out of bounds (require 0 <= start < end <= num_chunks)",
+            )
+                .into_response();
         }
         terms.push(Term { xorb, start: t.start, end: t.end, unpacked_length: t.unpacked_length });
     }
