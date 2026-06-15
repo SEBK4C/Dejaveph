@@ -13,7 +13,7 @@ Companion docs: [`DEVLOG.md`](DEVLOG.md) (per-iteration narrative), [`DEPLOYMENT
 | ⬜ | Not started |
 | ❄️ | Deferred / blocked (reason noted) |
 
-_Last updated: 2026-06-15 (after loop iteration 5)._
+_Last updated: 2026-06-15 (after loop iteration 6)._
 
 ---
 
@@ -28,12 +28,14 @@ Two independent stacks. Review/merge each chain in order.
 | #5 | harden(sec) iter3: verify file_hash commits to terms | `#3` | 🔵 open (stacked) |
 | #7 | harden(sec) iter4: HMAC+TTL capability URL for /xorb-data | `#5` | 🔵 open (stacked) |
 | #8 | harden(sec) iter5: unique temp + hard-link publish (concurrent put) | `#7` | 🔵 open (stacked) |
+| #9 | harden(sec) iter6: cap per-file chunk count (amplification DoS) | `#8` | 🔵 open (stacked) |
 | #2 | feat(nixos): services.xetd + 1Password(opnix)/Ceph | `main` | 🔵 open |
 | #4 | feat(xetfs): mount CLI + services.xetfs (client half) | `#2` | 🔵 open (stacked) |
 | #6 | feat(templates): three-machine flake templates | `#4` | 🔵 open (stacked) |
 
-**Next merge action (human):** review/merge the security chain `#1 → #3 → #5 → #7 → #8`, then the
-deployment chain `#2 → #4 → #6`. After merge, mark the corresponding 🔵 rows below as ✅.
+**Next merge action (human):** the security chain is now **6 deep** (`#1 → #3 → #5 → #7 → #8 →
+#9`) — worth merging the chain into `main` before it grows further; then the deployment chain
+`#2 → #4 → #6`. After merge, mark the corresponding 🔵 rows below as ✅.
 (`scripts/` QoL helpers — `dejaveph-doctor`, `bootstrap-ceph` — are already on `main`: ✅.)
 
 ---
@@ -83,10 +85,13 @@ Findings from the rolling audit. Severity from the original review of `main@0b28
 | MED | `register_file` doesn't verify `file_hash` (content poisoning) | MED | 🔵 | PR #5 — server recomputes file hash from terms' chunks, rejects mismatch |
 | MED | local-fs presign is unsigned/non-expiring (doc says HMAC) | MED | 🔵 | PR #7 — BLAKE3-keyed MAC + TTL; `/xorb-data` = capability OR bearer |
 | MED | concurrent `put` of same novel xorb: corrupt object + double-count | MED | 🔵 | PR #8 — unique temp + hard-link publish |
+| MED | `register_file` chunk-count amplification (tiny body → huge alloc) | MED | 🔵 | PR #9 — `MAX_FILE_CHUNKS` cap |
+| MED | `put_xorb` decompression bomb (unbounded decompress in validate) | MED | ⬜ | **fork-level**: enforce `MAX_CHUNK_SIZE` in `deserialize_chunk_*` (size-capped writer) |
 | LOW | no TLS (cleartext bearer) | LOW | ⬜ | deployment: front with TLS proxy (doc'd in DEPLOYMENT.md) |
 
 ### Future audit angles (queued, ~1 per iteration)
-- ⬜ Unbounded allocation / decompression bomb on the reconstruct path.
+- [~] Unbounded allocation / decompression bomb — register amplification **done iter6 (PR #9)**;
+  the `deserialize_chunk` decompression bomb is identified and needs a **fork-level** size cap.
 - ⬜ Volume/path catalog: no per-volume auth scoping (tokens are global).
 - [x] Idempotency / race in concurrent `put_xorb` — **done iter5 (PR #8)**; GC race done iter2.
 - ⬜ Fuzz the xorb footer parser + `parse_range` (cargo-fuzz / arbitrary).
@@ -218,3 +223,6 @@ logging it in DEVLOG.md; reflect each result here.
   publish fixes a corrupt-object + double-count race on concurrent identical uploads. New
   `m0_concurrent_put` (24-way race) + full e2e green. PR #8. QoL: shipped `dejaveph-doctor` +
   `bootstrap-ceph` helper scripts to `main`.
+- **2026-06-15 · Iteration 6** — Allocation-amplification angle: `register_file` `MAX_FILE_CHUNKS`
+  cap stops a tiny body of wide terms from exploding `file_pairs`. New `m0_amplification` + full
+  e2e green. PR #9. Also surfaced (deferred, fork-level) the `put_xorb` decompression bomb.
