@@ -114,18 +114,14 @@ pub struct AppState {
     pub blob: Arc<dyn BlobStore>,
     pub index: Mutex<Index>,
     pub metrics: Metrics,
-    /// This server's externally reachable base URL (e.g. `http://127.0.0.1:8080`), used to build
-    /// `fetch_info` URLs in reconstruction responses.
-    pub base_url: String,
 }
 
 impl AppState {
-    pub fn new(blob: Arc<dyn BlobStore>, base_url: String) -> Arc<Self> {
+    pub fn new(blob: Arc<dyn BlobStore>) -> Arc<Self> {
         Arc::new(Self {
             blob,
             index: Mutex::new(Index::default()),
             metrics: Metrics::default(),
-            base_url,
         })
     }
 }

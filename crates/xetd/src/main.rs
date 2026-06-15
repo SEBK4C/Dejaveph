@@ -12,7 +12,7 @@
 mod blob;
 mod state;
 
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     body::{Body, Bytes},
@@ -90,25 +90,25 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    let blob: Arc<dyn BlobStore> = match args.backend {
-        Backend::LocalFs => {
-            let root = args.blob_root.clone().unwrap_or_else(|| args.data_dir.join("blobs"));
-            Arc::new(LocalFsBlobStore::new(root))
-        }
-        Backend::S3 => anyhow::bail!("s3 backend not implemented yet (M4)"),
-    };
     tracing::info!(
         backend = ?args.backend, auth = ?args.auth, durability = ?args.durability,
         "xetd starting"
     );
 
-    // Bind first so the bound address can seed the reconstruction `fetch_info` base URL.
+    // Bind first so the bound address seeds the local-fs presign base URL.
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     let addr: SocketAddr = listener.local_addr()?;
     let base_url = format!("http://{addr}");
     tracing::info!(%addr, "listening");
 
-    let state = AppState::new(blob, base_url);
+    let blob: Arc<dyn BlobStore> = match args.backend {
+        Backend::LocalFs => {
+            let root = args.blob_root.clone().unwrap_or_else(|| args.data_dir.join("blobs"));
+            Arc::new(LocalFsBlobStore::new(root, base_url.clone()))
+        }
+        Backend::S3 => anyhow::bail!("s3 backend not yet enabled; rebuild with --features s3"),
+    };
+    let state = AppState::new(blob);
     let app = router(args.test_hooks, state);
 
     if let Some(ready) = args.ready_file.as_ref() {
@@ -198,27 +198,60 @@ async fn reconstruct(State(st): State<Arc<AppState>>, AxPath(file_hash_hex): AxP
     let Ok(fh) = DataHash::from_hex(&file_hash_hex) else {
         return (StatusCode::BAD_REQUEST, "malformed file hash").into_response();
     };
-    let idx = st.index.lock().unwrap();
-    let Some(file) = idx.files.get(&fh) else {
-        return StatusCode::NOT_FOUND.into_response();
+    // Collect everything needed under the index lock; presign afterwards (it's async, and we
+    // must not hold a std Mutex guard across an await). chunk range [start,end) -> compressed
+    // byte range via the stored end-offsets (§6.2).
+    struct Resolved {
+        xorb: DataHash,
+        start: u32,
+        end: u32,
+        unpacked: u64,
+        byte_start: u64,
+        byte_end: u64,
+    }
+    let collected: Result<Vec<Resolved>, StatusCode> = {
+        let idx = st.index.lock().unwrap();
+        match idx.files.get(&fh) {
+            None => Err(StatusCode::NOT_FOUND),
+            Some(file) => {
+                let mut v = Vec::with_capacity(file.terms.len());
+                let mut bad = None;
+                for t in &file.terms {
+                    let Some(meta) = idx.xorbs.get(&t.xorb) else {
+                        bad = Some(StatusCode::INTERNAL_SERVER_ERROR);
+                        break;
+                    };
+                    let byte_start = if t.start == 0 { 0 } else { meta.boundary_offsets[(t.start - 1) as usize] as u64 };
+                    let byte_end = meta.boundary_offsets[(t.end - 1) as usize] as u64 - 1; // inclusive
+                    v.push(Resolved { xorb: t.xorb, start: t.start, end: t.end, unpacked: t.unpacked_length, byte_start, byte_end });
+                }
+                match bad {
+                    Some(code) => Err(code),
+                    None => Ok(v),
+                }
+            }
+        }
+    };
+    let collected = match collected {
+        Ok(v) => v,
+        Err(code) => return code.into_response(),
     };
 
-    let mut terms = Vec::with_capacity(file.terms.len());
+    let ttl = Duration::from_secs(900);
+    let mut terms = Vec::with_capacity(collected.len());
     let mut fetch_info: HashMap<String, Vec<FetchInfo>> = HashMap::new();
-    for t in &file.terms {
-        let Some(meta) = idx.xorbs.get(&t.xorb) else {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "term references unindexed xorb").into_response();
+    for t in collected {
+        let url = match st.blob.presign_get(&t.xorb, ttl).await {
+            Ok(u) => u,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("presign: {e}")).into_response(),
         };
-        // chunk range [start, end) -> compressed byte range using stored end-offsets (§6.2).
-        let byte_start = if t.start == 0 { 0 } else { meta.boundary_offsets[(t.start - 1) as usize] as u64 };
-        let byte_end = meta.boundary_offsets[(t.end - 1) as usize] as u64 - 1; // inclusive
         let xorb_hex = t.xorb.hex();
         let range = ChunkRange { start: t.start, end: t.end };
-        terms.push(ReconTerm { hash: xorb_hex.clone(), unpacked_length: t.unpacked_length, range });
-        fetch_info.entry(xorb_hex.clone()).or_default().push(FetchInfo {
+        terms.push(ReconTerm { hash: xorb_hex.clone(), unpacked_length: t.unpacked, range });
+        fetch_info.entry(xorb_hex).or_default().push(FetchInfo {
             range,
-            url: format!("{}/api/v1/xorb-data/{}", st.base_url, xorb_hex),
-            url_range: ByteRange { start: byte_start, end: byte_end },
+            url,
+            url_range: ByteRange { start: t.byte_start, end: t.byte_end },
         });
     }
     Json(ReconResponse { offset_into_first_range: 0, terms, fetch_info }).into_response()
