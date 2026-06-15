@@ -14,7 +14,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bytes::Bytes;
 use tempfile::TempDir;
+use xet_core::cas_object::{Chunk, RawXorbData, SerializedXorbObject};
 
 /// Deterministic byte source (splitmix64). Identical `(seed,len)` ⇒ identical bytes ⇒
 /// identical CDC boundaries across runs — no external RNG (would version-couple them).
@@ -92,6 +94,39 @@ impl Xetd {
             .expect("spawn xetd (s3)");
         let base = await_ready(&ready);
         Self { base, data, blob_root: PathBuf::new(), child }
+    }
+
+    /// Spawn `xetd` with `--auth tokens` (local-fs backend, test hooks on).
+    pub fn spawn_tokens() -> Self {
+        let data = TempDir::new().unwrap();
+        let blob_root = data.path().join("blobs");
+        let ready = data.path().join("ready");
+        let child = Command::new(env!("CARGO_BIN_EXE_xetd"))
+            .arg("--listen").arg("127.0.0.1:0")
+            .arg("--data-dir").arg(data.path())
+            .arg("--db").arg(data.path().join("index.sqlite"))
+            .arg("--backend").arg("local-fs")
+            .arg("--blob-root").arg(&blob_root)
+            .arg("--durability").arg("close")
+            .arg("--auth").arg("tokens")
+            .arg("--test-hooks")
+            .arg("--ready-file").arg(&ready)
+            .spawn()
+            .expect("spawn xetd (tokens)");
+        let base = await_ready(&ready);
+        Self { base, data, blob_root, child }
+    }
+
+    /// Mint a scoped bearer token via the test hook (`scope` = "read" | "write").
+    pub fn mint_token(&self, scope: &str) -> String {
+        let v: serde_json::Value = reqwest::blocking::Client::new()
+            .post(self.url("/admin/test/mint_token"))
+            .json(&serde_json::json!({ "scope": scope }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        v["token"].as_str().unwrap().to_string()
     }
 
     pub fn url(&self, p: &str) -> String {
@@ -195,4 +230,36 @@ pub fn mount(srv: &Xetd, volume: &str, rw: bool) -> Mount {
     let _session = fuser::spawn_mount2(fs, dir.path(), &opts).expect("mount xetfs");
     std::thread::sleep(Duration::from_millis(100)); // let the kernel finish the mount handshake
     Mount { _session, dir }
+}
+
+/// Serialize a real xorb of `n` deterministic 16 KiB chunks; returns `(bytes, xorb_hash_hex)`.
+pub fn build_xorb(seed: u64, n: usize) -> (Vec<u8>, String) {
+    let chunks: Vec<Chunk> = (0..n)
+        .map(|i| Chunk::new(Bytes::from(gen_blob(seed.wrapping_add(i as u64), 16 * 1024))))
+        .collect();
+    let raw = RawXorbData::from_chunks(&chunks, vec![0]);
+    let ser = SerializedXorbObject::from_xorb(raw, true, "lz4", 0).unwrap();
+    (ser.serialized_data, ser.hash.hex())
+}
+
+/// Flip one byte in the chunk-data region of the first stored xorb (to exercise scrub).
+pub fn corrupt_one_xorb_byte(blob_root: &Path) {
+    fn first_file(p: &Path) -> Option<PathBuf> {
+        for e in fs::read_dir(p).ok()?.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                if let Some(f) = first_file(&path) {
+                    return Some(f);
+                }
+            } else if !path.file_name().unwrap().to_string_lossy().starts_with('.') {
+                return Some(path);
+            }
+        }
+        None
+    }
+    let f = first_file(blob_root).expect("a stored xorb to corrupt");
+    let mut data = fs::read(&f).unwrap();
+    let i = data.len() / 4; // chunk-data region (before the trailing footer)
+    data[i] ^= 0xFF;
+    fs::write(&f, data).unwrap();
 }

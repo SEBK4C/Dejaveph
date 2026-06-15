@@ -14,12 +14,13 @@ mod blob;
 mod s3;
 mod state;
 
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::{HashMap, HashSet}, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path as AxPath, State},
     http::{HeaderMap, HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -33,7 +34,7 @@ use xet_core::cas_object::XorbObject;
 use xet_core::merklehash::DataHash;
 
 use crate::blob::{BlobStore, LocalFsBlobStore};
-use crate::state::{AppState, FileRecord, Term};
+use crate::state::{AppState, AuthMode, FileRecord, Term};
 
 /// Max accepted request body. Xorbs are ≤ `MAX_XORB_SIZE` (64 MiB); allow headroom.
 const MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
@@ -110,7 +111,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Backend::S3 => construct_s3(&args).await?,
     };
-    let state = AppState::new(blob);
+    let auth = match args.auth {
+        Auth::Loopback => AuthMode::Loopback,
+        Auth::Tokens => AuthMode::Tokens,
+    };
+    let state = AppState::new(blob, auth, random_token("read"), random_token("write"));
     let app = router(args.test_hooks, state);
 
     if let Some(ready) = args.ready_file.as_ref() {
@@ -153,13 +158,57 @@ fn router(test_hooks: bool, state: Arc<AppState>) -> Router {
     if test_hooks {
         app = app
             .route("/admin/test/metric/{name}", get(test_metric))
+            .route("/admin/test/mint_token", post(test_mint_token))
             .route("/admin/test/fault", post(test_noop))
             .route("/admin/test/crash_at", post(test_noop))
             .route("/admin/test/dedup_key", post(test_noop))
-            .route("/admin/test/gc", post(test_noop))
-            .route("/admin/test/scrub", post(test_noop));
+            .route("/admin/test/gc", post(test_gc))
+            .route("/admin/test/scrub", post(test_scrub));
     }
-    app.layer(DefaultBodyLimit::max(MAX_BODY_BYTES)).with_state(state)
+    app.layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_mw))
+        .with_state(state)
+}
+
+/// Bearer-scope auth (§4.1, §12). Loopback mode and `/admin/*` test hooks are exempt; POSTs
+/// (xorb/shard/file uploads) need write scope, GETs need read (write implies read).
+async fn auth_mw(State(st): State<Arc<AppState>>, req: axum::extract::Request, next: Next) -> Response {
+    use axum::http::{header::AUTHORIZATION, Method};
+    if st.auth == AuthMode::Loopback || req.uri().path().starts_with("/admin/") {
+        return next.run(req).await;
+    }
+    let need_write = req.method() == Method::POST;
+    let token = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string();
+    if token.is_empty() {
+        return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
+    }
+    let ok = if need_write {
+        token == st.write_token
+    } else {
+        token == st.read_token || token == st.write_token
+    };
+    if ok {
+        next.run(req).await
+    } else {
+        (StatusCode::FORBIDDEN, "insufficient scope").into_response()
+    }
+}
+
+/// Opaque per-process bearer token (16 bytes from /dev/urandom). Real JWT issuance is a refinement.
+fn random_token(prefix: &str) -> String {
+    use std::io::Read;
+    let mut buf = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut buf);
+    }
+    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{prefix}-{hex}")
 }
 
 // ---------------------------------------------------------------------------
@@ -445,4 +494,66 @@ async fn test_metric(State(st): State<Arc<AppState>>, AxPath(name): AxPath<Strin
 }
 async fn test_noop() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
+}
+
+/// Mark-and-sweep GC (§11.1): roots = every file's referenced xorbs; sweep the rest from the
+/// BlobStore and the index. (A grace period for in-flight uploads is a later refinement.)
+async fn test_gc(State(st): State<Arc<AppState>>) -> Response {
+    let (referenced, all): (HashSet<DataHash>, Vec<DataHash>) = {
+        let idx = st.index.lock().unwrap();
+        let mut refd = HashSet::new();
+        for f in idx.files.values() {
+            for t in &f.terms {
+                refd.insert(t.xorb);
+            }
+        }
+        (refd, idx.xorbs.keys().copied().collect())
+    };
+    let mut swept = 0u64;
+    for x in all {
+        if !referenced.contains(&x) {
+            let _ = st.blob.delete(&x).await;
+            let mut idx = st.index.lock().unwrap();
+            idx.xorbs.remove(&x);
+            idx.chunk_index.retain(|_, loc| loc.xorb != x);
+            swept += 1;
+        }
+    }
+    Json(json!({ "swept": swept })).into_response()
+}
+
+/// Scrub (§11.2): re-verify each stored xorb's Merkle root; count mismatches as quarantined.
+async fn test_scrub(State(st): State<Arc<AppState>>) -> Response {
+    let xorbs: Vec<DataHash> = st.index.lock().unwrap().xorbs.keys().copied().collect();
+    let mut checked = 0u64;
+    let mut quarantined = 0u64;
+    for x in xorbs {
+        checked += 1;
+        let len = match st.blob.head(&x).await {
+            Ok(Some(m)) => m.len,
+            _ => {
+                quarantined += 1;
+                continue;
+            }
+        };
+        let bytes = match st.blob.get_range(&x, 0, len.saturating_sub(1)).await {
+            Ok(b) => b,
+            _ => {
+                quarantined += 1;
+                continue;
+            }
+        };
+        let mut cursor = std::io::Cursor::new(bytes.as_ref());
+        if !matches!(XorbObject::validate_xorb_object(&mut cursor, &x), Ok(Some(_))) {
+            quarantined += 1;
+        }
+    }
+    Json(json!({ "checked": checked, "quarantined": quarantined })).into_response()
+}
+
+/// Issue a scoped bearer token (test-hook stand-in for the §4.1 token endpoint).
+async fn test_mint_token(State(st): State<Arc<AppState>>, Json(body): Json<serde_json::Value>) -> Response {
+    let scope = body.get("scope").and_then(|s| s.as_str()).unwrap_or("read");
+    let token = if scope == "write" { st.write_token.clone() } else { st.read_token.clone() };
+    Json(json!({ "token": token })).into_response()
 }

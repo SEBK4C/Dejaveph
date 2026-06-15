@@ -110,18 +110,32 @@ impl Index {
     }
 }
 
+/// Auth posture (§4.1). Loopback = no auth (single-user); Tokens = bearer scope enforcement.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    Loopback,
+    Tokens,
+}
+
 pub struct AppState {
     pub blob: Arc<dyn BlobStore>,
     pub index: Mutex<Index>,
     pub metrics: Metrics,
+    pub auth: AuthMode,
+    /// Opaque bearer tokens for `tokens` mode (write implies read). Ignored in loopback.
+    pub read_token: String,
+    pub write_token: String,
 }
 
 impl AppState {
-    pub fn new(blob: Arc<dyn BlobStore>) -> Arc<Self> {
+    pub fn new(blob: Arc<dyn BlobStore>, auth: AuthMode, read_token: String, write_token: String) -> Arc<Self> {
         Arc::new(Self {
             blob,
             index: Mutex::new(Index::default()),
             metrics: Metrics::default(),
+            auth,
+            read_token,
+            write_token,
         })
     }
 }

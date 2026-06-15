@@ -33,6 +33,9 @@ pub trait BlobStore: Send + Sync {
     /// A time-limited URL a client can GET (appending a `Range` header) to fetch the object
     /// directly. local-fs returns xetd's `/xorb-data` URL; s3 returns a presigned RGW/S3 URL.
     async fn presign_get(&self, key: &MerkleHash, ttl: Duration) -> Result<String>;
+
+    /// Delete an object (GC only). Safe to call on a missing key.
+    async fn delete(&self, key: &MerkleHash) -> Result<()>;
 }
 
 /// Local-filesystem backend with two-level hex fan-out: `<root>/<h0h1>/<h2h3>/<hash>`.
@@ -91,5 +94,13 @@ impl BlobStore for LocalFsBlobStore {
 
     async fn presign_get(&self, key: &MerkleHash, _ttl: Duration) -> Result<String> {
         Ok(format!("{}/api/v1/xorb-data/{}", self.public_base, key.hex()))
+    }
+
+    async fn delete(&self, key: &MerkleHash) -> Result<()> {
+        match tokio::fs::remove_file(self.path_for(key)).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 }

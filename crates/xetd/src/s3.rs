@@ -109,4 +109,15 @@ impl BlobStore for S3BlobStore {
             .context("presign get_object")?;
         Ok(req.uri().to_string())
     }
+
+    async fn delete(&self, key: &MerkleHash) -> Result<()> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(Self::key_for(key))
+            .send()
+            .await
+            .context("s3 delete_object")?;
+        Ok(())
+    }
 }

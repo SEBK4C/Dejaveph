@@ -23,6 +23,15 @@ use xet_core::merklehash::file_hash;
 const MAX_XORB_UNCOMPRESSED: usize = 60 * 1024 * 1024;
 const MAX_XORB_CHUNKS: usize = 8192;
 
+/// Attach the `XETD_TOKEN` bearer (if set) so the agent authenticates against a tokens-mode
+/// server; a no-op in trusted-loopback deployments.
+fn auth(rb: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
+    match std::env::var("XETD_TOKEN") {
+        Ok(t) if !t.is_empty() => rb.bearer_auth(t),
+        _ => rb,
+    }
+}
+
 /// Outcome of an ingest — carries the file's XET-string content hash.
 pub struct Ingested {
     file_hash_hex: String,
@@ -109,17 +118,15 @@ pub fn ingest_bytes(base_url: &str, volume: &str, dest: &str, bytes: &[u8], _scr
 
     // 5. Register the file (terms + VFS catalog entry).
     let total_size: u64 = chunks.iter().map(|c| c.data.len() as u64).sum();
-    let resp = client
-        .post(format!("{base_url}/api/v1/files"))
-        .json(&json!({
-            "file_hash": fh.hex(),
-            "total_size": total_size,
-            "terms": terms,
-            "volume": volume,
-            "path": dest,
-        }))
-        .send()
-        .context("register file")?;
+    let resp = auth(client.post(format!("{base_url}/api/v1/files")).json(&json!({
+        "file_hash": fh.hex(),
+        "total_size": total_size,
+        "terms": terms,
+        "volume": volume,
+        "path": dest,
+    })))
+    .send()
+    .context("register file")?;
     ensure!(resp.status().is_success(), "file registration failed: HTTP {}", resp.status());
 
     Ok(Ingested { file_hash_hex: fh.hex() })
@@ -127,8 +134,7 @@ pub fn ingest_bytes(base_url: &str, volume: &str, dest: &str, bytes: &[u8], _scr
 
 /// Query the global dedup index for one chunk. `Some(loc)` on a hit, `None` on a `404` miss.
 fn query_chunk(client: &reqwest::blocking::Client, base_url: &str, hash_hex: &str) -> Result<Option<ChunkLoc>> {
-    let resp = client
-        .get(format!("{base_url}/api/v1/chunks/default-merkledb/{hash_hex}"))
+    let resp = auth(client.get(format!("{base_url}/api/v1/chunks/default-merkledb/{hash_hex}")))
         .send()
         .context("chunk dedup query")?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -142,9 +148,7 @@ fn query_chunk(client: &reqwest::blocking::Client, base_url: &str, hash_hex: &st
 }
 
 fn upload_xorb(client: &reqwest::blocking::Client, base_url: &str, xorb_hex: &str, bytes: Vec<u8>) -> Result<()> {
-    let resp = client
-        .post(format!("{base_url}/api/v1/xorbs/default/{xorb_hex}"))
-        .body(bytes)
+    let resp = auth(client.post(format!("{base_url}/api/v1/xorbs/default/{xorb_hex}")).body(bytes))
         .send()
         .context("upload xorb")?;
     ensure!(resp.status().is_success(), "xorb upload failed: HTTP {}", resp.status());
@@ -155,8 +159,7 @@ fn upload_xorb(client: &reqwest::blocking::Client, base_url: &str, xorb_hex: &st
 /// range, deserialize + decompress its chunks, and concatenate.
 pub fn reconstruct(base_url: &str, file_hash_hex: &str) -> Result<Vec<u8>> {
     let client = reqwest::blocking::Client::new();
-    let resp = client
-        .get(format!("{base_url}/api/v1/reconstructions/{file_hash_hex}"))
+    let resp = auth(client.get(format!("{base_url}/api/v1/reconstructions/{file_hash_hex}")))
         .send()
         .context("query reconstruction")?;
     ensure!(resp.status().is_success(), "reconstruction query failed: HTTP {}", resp.status());
@@ -185,9 +188,7 @@ pub fn reconstruct(base_url: &str, file_hash_hex: &str) -> Result<Vec<u8>> {
         let bs = fi["url_range"]["start"].as_u64().context("missing url_range.start")?;
         let be = fi["url_range"]["end"].as_u64().context("missing url_range.end")?; // inclusive
 
-        let body = client
-            .get(url)
-            .header("Range", format!("bytes={bs}-{be}"))
+        let body = auth(client.get(url).header("Range", format!("bytes={bs}-{be}")))
             .send()
             .context("fetch xorb range")?
             .bytes()

@@ -4,7 +4,7 @@ A self-hostable storage server that speaks the **Xet protocol** (`XET-BLAKE3-GEA
 
 This repo builds on the vendored **[`SEBK4C/xet-core`](https://github.com/SEBK4C/xet-core)** fork (a fork of `huggingface/xet-core`) for byte-for-byte format conformance. The full design lives in [`Prompt.md`](Prompt.md); the architecture map and the spec→fork crate mapping live in [`CLAUDE.md`](CLAUDE.md).
 
-> **Status: early implementation.** The protocol **conformance gate passes** (the server's hashing agrees with stock xet-core) and the **Core CAS ingest→reconstruct round-trip works** end-to-end (chunk → xorb → integrity-gated store → reconstruct, byte-identical). Remaining M0 work: the binary `mdb_shard` upload (`/shards`, for stock-client interop) and global dedup (`/chunks`).
+> **Status: all milestone invariants pass** — conformance + M0–M5. You can run the server, ingest with edit-locality dedup, mount a volume read+write, point bulk reads straight at S3/RGW, and operate it (GC, scrub, token scopes). M4's S3 backend compiles behind `--features s3`; its live MinIO/RGW test needs Docker. Remaining work is **refinement**, not new milestones (see the bottom of this file and `CLAUDE.md`).
 
 ## What works today
 
@@ -16,7 +16,7 @@ This repo builds on the vendored **[`SEBK4C/xet-core`](https://github.com/SEBK4C
 | **M2** Read-only VFS | 🟢 FUSE mount working — files read through the mount match the originals; `readdir` + partial reads (needs `/dev/fuse` + setuid `fusermount`) |
 | **M3** Writable VFS | 🟢 write-back-on-close working — an in-place edit yields the same `file_hash` as a full ingest (`incremental == full`); truncate/append. Crash-recovery + GC refcounts pending |
 | **M4** Ceph/S3 | 🟡 S3/RGW `BlobStore` implemented (behind `--features s3`) + presigned ranged GETs; reconstruction points clients straight at the object store. Live MinIO/RGW test is `#[ignore]` (needs Docker) |
-| **M5** Operate | ⏳ planned (see `Prompt.md` §15) |
+| **M5** Operate | 🟢 mark-sweep GC (orphans reclaimed, referenced spared), scrub (corruption quarantined), bearer token scopes (read→403 on write), metrics |
 
 ## Reproduce it yourself
 
