@@ -13,7 +13,7 @@ Companion docs: [`DEVLOG.md`](DEVLOG.md) (per-iteration narrative), [`DEPLOYMENT
 | ⬜ | Not started |
 | ❄️ | Deferred / blocked (reason noted) |
 
-_Last updated: 2026-06-15 (after loop iteration 3)._
+_Last updated: 2026-06-15 (after loop iteration 4)._
 
 ---
 
@@ -26,11 +26,12 @@ Two independent stacks. Review/merge each chain in order.
 | #1 | harden(sec): bound term ranges + fail-closed token RNG (2 HIGH) | `main` | 🔵 open |
 | #3 | harden(sec) iter2: bounded ranged reads + TOCTOU-safe GC | `#1` | 🔵 open (stacked) |
 | #5 | harden(sec) iter3: verify file_hash commits to terms | `#3` | 🔵 open (stacked) |
+| #7 | harden(sec) iter4: HMAC+TTL capability URL for /xorb-data | `#5` | 🔵 open (stacked) |
 | #2 | feat(nixos): services.xetd + 1Password(opnix)/Ceph | `main` | 🔵 open |
 | #4 | feat(xetfs): mount CLI + services.xetfs (client half) | `#2` | 🔵 open (stacked) |
 | #6 | feat(templates): three-machine flake templates | `#4` | 🔵 open (stacked) |
 
-**Next merge action (human):** review/merge the security chain `#1 → #3 → #5`, then the
+**Next merge action (human):** review/merge the security chain `#1 → #3 → #5 → #7`, then the
 deployment chain `#2 → #4 → #6`. After merge, mark the corresponding 🔵 rows below as ✅.
 
 ---
@@ -78,7 +79,7 @@ Findings from the rolling audit. Severity from the original review of `main@0b28
 | MED | GC TOCTOU → can orphan a live file | MED | 🔵 | PR #3 (single-lock root+evict) |
 | — | footer-offset poison via `POST /xorbs` (hypothesis) | — | ✅ | Verified **negative** — fork gate already blocks it |
 | MED | `register_file` doesn't verify `file_hash` (content poisoning) | MED | 🔵 | PR #5 — server recomputes file hash from terms' chunks, rejects mismatch |
-| MED | local-fs presign is unsigned/non-expiring (doc says HMAC) | MED | ❄️ | deferred: capability-URL = auth-model rework (`auth_mw` + test rework) |
+| MED | local-fs presign is unsigned/non-expiring (doc says HMAC) | MED | 🔵 | PR #7 — BLAKE3-keyed MAC + TTL; `/xorb-data` = capability OR bearer |
 | LOW | no TLS (cleartext bearer) | LOW | ⬜ | deployment: front with TLS proxy (doc'd in DEPLOYMENT.md) |
 
 ### Future audit angles (queued, ~1 per iteration)
@@ -205,3 +206,7 @@ logging it in DEVLOG.md; reflect each result here.
   hash from the terms' chunks and rejects mismatches (content-poisoning MEDIUM). Shipped the
   three-machine flake templates (gateway/client/demo). Full e2e (incl. m3 write-back) green.
   PRs #5, #6.
+- **2026-06-15 · Iteration 4** — Capability-access angle: `/xorb-data` is now a BLAKE3-keyed,
+  TTL-bounded capability URL (capability OR bearer), closing the last MEDIUM and the §5.4/§10
+  doc-vs-code gap. `cap` unit tests + `m4_capability` + full e2e green. PR #7. **All HIGH+MEDIUM
+  audit findings now patched** (on branches).
