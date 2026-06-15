@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
-    ReplyWrite, Request, TimeOrNow,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
 
 const TTL: Duration = Duration::from_secs(1);
@@ -49,8 +49,7 @@ pub struct Xetfs {
     nodes: HashMap<u64, Node>,
     open_files: HashMap<u64, Staging>,
     cache: Mutex<HashMap<u64, Arc<Vec<u8>>>>,
-    #[allow(dead_code)] // next free inode — used by create() (new-file path, a later refinement)
-    next: u64,
+    next: u64, // next free inode (create())
     uid: u32,
     gid: u32,
 }
@@ -234,6 +233,40 @@ impl Filesystem for Xetfs {
     fn open(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
         // direct_io: bypass the kernel page cache so reads reflect live writes.
         reply.opened(0, fuser::consts::FOPEN_DIRECT_IO);
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let name = name.to_string_lossy().to_string();
+        let children = self.nodes.get(&parent).map(|p| p.children.clone()).unwrap_or_default();
+        let existing = children.into_iter().find(|c| self.nodes.get(c).is_some_and(|n| n.name == name));
+        let ino = match existing {
+            Some(i) => i,
+            None => {
+                let i = self.next;
+                self.next += 1;
+                self.nodes.insert(
+                    i,
+                    Node { name, kind: Kind::File, parent, children: vec![], file_hash: None, size: 0 },
+                );
+                self.nodes.get_mut(&parent).unwrap().children.push(i);
+                i
+            }
+        };
+        // Open for write with an empty (dirty) staging buffer so even a zero-byte create persists.
+        self.open_files.insert(ino, Staging { buf: Vec::new(), dirty: true });
+        match self.attr(ino) {
+            Some(attr) => reply.created(&TTL, &attr, 0, 0, fuser::consts::FOPEN_DIRECT_IO),
+            None => reply.error(libc::EIO),
+        }
     }
 
     fn read(

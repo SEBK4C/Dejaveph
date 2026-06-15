@@ -79,3 +79,31 @@ fn m3_truncate_and_append() {
     let fh = xetfs::catalog_file_hash(&srv.base, "vol", "/t.bin").unwrap();
     assert_eq!(ag.reconstruct(&fh).len(), 1004);
 }
+
+#[test]
+fn m3_create_new_file_and_clone_is_free() {
+    let srv = Xetd::spawn();
+    let ag = Agent::new(&srv);
+    let src = gen_blob(0x6000, 8 * 1024 * 1024);
+    ag.ingest("vol", "/src.bin", &src); // seed the volume so the mount has a tree
+
+    let m = mount(&srv, "vol", true);
+
+    // (1) Create a brand-new file *through the mount* (create + write + close), then read back.
+    let newp = m.dir.path().join("new.bin");
+    let payload = gen_blob(0x77, 1024 * 1024);
+    std::fs::write(&newp, &payload).unwrap();
+    assert_eq!(sha256(&std::fs::read(&newp).unwrap()), sha256(&payload), "created file read-back mismatch");
+    let fh = xetfs::catalog_file_hash(&srv.base, "vol", "/new.bin").unwrap();
+    assert_eq!(sha256(&ag.reconstruct(&fh)), sha256(&payload), "created file reconstruction mismatch");
+
+    // (2) Cloning is free: copying already-stored content uploads no new xorbs (CAS dedup).
+    let before = srv.metric("xorb_puts");
+    std::fs::copy(m.dir.path().join("src.bin"), m.dir.path().join("clone.bin")).unwrap();
+    assert_eq!(
+        sha256(&std::fs::read(m.dir.path().join("clone.bin")).unwrap()),
+        sha256(&src),
+        "clone content mismatch"
+    );
+    assert_eq!(srv.metric("xorb_puts"), before, "cloning stored content must not upload new xorbs");
+}
