@@ -123,12 +123,45 @@ A successful xorb upload lands an object under `dejaveph-xorbs/xorbs/<h0h1>/<h2h
 
 ## 5. Mounting the VFS on a client
 
-On a mount host (needs `/dev/fuse` + the setuid `fusermount` from `pkgs.fuse`):
+The `xetfs` CLI (flake `packages.xetfs`) mounts a volume as a reconstructing FUSE filesystem.
+Needs `/dev/fuse` + the setuid `fusermount` from `pkgs.fuse`.
 
 ```bash
-# (xetfs CLI wiring is M2/M3; for now the integration harness drives xetfs::Xetfs::connect.)
-# Point it at the server and a volume name; reads reconstruct on demand, writes write back.
+# read-only
+xetfs --server http://dejaveph.home.arpa:9777 --volume models /mnt/models
+# read-write (write-back on close); tokens-mode server needs XETD_TOKEN in the environment
+XETD_TOKEN=write-… xetfs --server http://dejaveph.home.arpa:9777 --volume scratch --rw /mnt/scratch
 ```
+
+Declaratively on NixOS via the `xetfs` module (the client half), with the mount's bearer token
+sourced from 1Password just like the server's RGW creds:
+
+```nix
+{ pkgs, dejaveph, ... }:
+{
+  imports = [ dejaveph.nixosModules.xetfs ];
+  services.xetfs = {
+    package = dejaveph.packages.${pkgs.system}.xetfs;
+    mounts = {
+      models = {
+        server = "http://dejaveph.home.arpa:9777";
+        volume = "models";
+        mountpoint = "/mnt/models";          # read-only
+      };
+      scratch = {
+        server = "http://dejaveph.home.arpa:9777";
+        volume = "scratch";
+        mountpoint = "/mnt/scratch";
+        readWrite = true;
+        tokenFile = "/run/secrets/dejaveph-xetd-token.env";  # XETD_TOKEN=… rendered by opnix
+      };
+    };
+  };
+}
+```
+
+For the token, add a `dejaveph-xetd-tokens` item to the `Infrastructure` vault and have opnix
+render `XETD_TOKEN=op://Infrastructure/dejaveph-xetd-tokens/write_token` to that file.
 
 ---
 
