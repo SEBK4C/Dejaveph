@@ -137,7 +137,7 @@ placeholders, materialize-on-access, Finder badges, no kext). Our on-demand reco
 
 | Item | Status | Notes |
 |---|---|---|
-| Design doc (`docs/macos-client.md`) | ⬜ | write FIRST, review before any Swift |
+| Design doc (`docs/macos-client.md`) | ✅ | on `main` (iter8) — File Provider + uniffi; review before Swift |
 | `libxetagent` — `xet-agent` exposed via `uniffi` (Rust core, FFI) | ⬜ | reused by macOS + future Windows |
 | File Provider Extension (Swift) | ⬜ | the "Dropbox" behavior |
 | Menu-bar app (SwiftUI) — status, mounts, sign-in | ⬜ | |
