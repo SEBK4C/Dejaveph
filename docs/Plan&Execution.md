@@ -55,7 +55,7 @@ Per `CLAUDE.md`. These are the spec deliverables; all milestone invariants curre
 | Item | Status | Notes |
 |---|---|---|
 | Binary `mdb_shard` `/shards` (stock-`hf-xet` interop) | ⬜ | replaces M0-internal `POST /files` JSON |
-| `register_file` → verify `file_hash` commits to terms | ⬜ | **security-relevant** — see B (content-poisoning) |
+| `register_file` → verify `file_hash` commits to terms | 🔵 | done in PR #5 (see B) |
 | M3 crash-recovery + reflink (`copy_file_range`) | ⬜ | |
 | Refcount-based online GC | ⬜ | current GC is mark-sweep, test-hook |
 | Dedup tiers 1–2 (session + local shard cache) | ⬜ | §7.1 |
