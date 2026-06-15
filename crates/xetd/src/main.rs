@@ -128,6 +128,7 @@ fn router(test_hooks: bool, state: Arc<AppState>) -> Router {
         .route("/api/v1/xorbs/{namespace}/{xorb_hash}", post(put_xorb)) // §4.4
         .route("/api/v1/shards", post(put_shard)) // §4.5
         .route("/api/v1/files", post(register_file)) // M0-internal file registration
+        .route("/api/v1/volumes/{volume}/entries", get(list_entries)) // VFS catalog listing (§9.1)
         .route("/api/v1/xorb-data/{xorb_hash}", get(xorb_data)); // §4.6
 
     if test_hooks {
@@ -248,6 +249,26 @@ async fn register_file(State(st): State<Arc<AppState>>, Json(req): Json<Register
         idx.catalog.insert((v, p), fh);
     }
     Json(json!({ "result": if existed { 0 } else { 1 } })).into_response()
+}
+
+#[derive(Serialize)]
+struct EntryOut {
+    path: String,
+    file_hash: String,
+    size: u64,
+}
+
+/// List a volume's catalog entries (path → file_hash + size) for the VFS mount (§9.1).
+async fn list_entries(State(st): State<Arc<AppState>>, AxPath(volume): AxPath<String>) -> Response {
+    let idx = st.index.lock().unwrap();
+    let mut out = Vec::new();
+    for ((vol, path), fh) in idx.catalog.iter() {
+        if vol == &volume {
+            let size = idx.files.get(fh).map(|f| f.total_size).unwrap_or(0);
+            out.push(EntryOut { path: path.clone(), file_hash: fh.hex(), size });
+        }
+    }
+    Json(out).into_response()
 }
 
 /// §4.4 — upload a serialized xorb. Integrity gate: recomputed Merkle root must equal the

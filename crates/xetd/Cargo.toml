@@ -28,6 +28,9 @@ xet-agent = { workspace = true }
 # Conformance vectors call the fork primitives directly through the facade.
 xet-core-facade = { workspace = true }
 hex = "0.4"
+# FUSE mount harness (m2+).
+xetfs = { workspace = true }
+fuser = { version = "0.14", default-features = false }
 # No TLS backend: the harness only talks to a loopback http:// server.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 sha2 = "0.10"

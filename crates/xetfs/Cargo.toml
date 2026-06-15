@@ -11,4 +11,9 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
-# TODO(M2): add `fuser` + the data path (xet-agent, xet-core-facade) for the real mount.
+# default-features=false avoids libfuse/pkg-config; mounting goes through setuid `fusermount`.
+fuser = { version = "0.14", default-features = false }
+libc = "0.2"
+xet-agent = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+serde_json = { workspace = true }

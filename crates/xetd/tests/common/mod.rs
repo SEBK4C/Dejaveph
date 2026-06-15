@@ -152,3 +152,24 @@ fn dir_size_bytes(root: &Path) -> u64 {
     }
     n
 }
+
+/// RAII FUSE mount of a volume. `_session` is declared first so it drops (unmounts) before
+/// `dir` is removed. `AutoUnmount` is intentionally NOT used — it implicitly requests
+/// `allow_other`, which needs `user_allow_other` in /etc/fuse.conf; the session's own drop
+/// unmounts for our explicit-drop RAII.
+pub struct Mount {
+    _session: fuser::BackgroundSession,
+    pub dir: TempDir,
+}
+
+pub fn mount(srv: &Xetd, volume: &str, rw: bool) -> Mount {
+    let dir = TempDir::new().unwrap();
+    let fs = xetfs::Xetfs::connect(&srv.base, volume, rw).unwrap();
+    let mut opts = vec![fuser::MountOption::FSName("xetfs".into())];
+    if !rw {
+        opts.push(fuser::MountOption::RO);
+    }
+    let _session = fuser::spawn_mount2(fs, dir.path(), &opts).expect("mount xetfs");
+    std::thread::sleep(Duration::from_millis(100)); // let the kernel finish the mount handshake
+    Mount { _session, dir }
+}
