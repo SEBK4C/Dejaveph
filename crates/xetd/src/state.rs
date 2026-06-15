@@ -47,8 +47,10 @@ pub struct XorbMeta {
     /// Compressed end offset of each chunk within the serialized xorb.
     pub boundary_offsets: Vec<u32>,
     /// Uncompressed cumulative end offset of each chunk.
-    #[allow(dead_code)]
     pub unpacked_offsets: Vec<u32>,
+    /// Per-chunk content hashes (from the validated footer). Lets `register_file` recompute a
+    /// file's hash from its terms and reject claims that don't commit to the referenced content.
+    pub chunk_hashes: Vec<MerkleHash>,
 }
 
 impl XorbMeta {
@@ -57,7 +59,15 @@ impl XorbMeta {
             num_chunks: info.num_chunks,
             boundary_offsets: info.chunk_boundary_offsets.clone(),
             unpacked_offsets: info.unpacked_chunk_offsets.clone(),
+            chunk_hashes: info.chunk_hashes.clone(),
         }
+    }
+
+    /// Uncompressed length of chunk `i` (cumulative end offsets ⇒ `offset[i] - offset[i-1]`).
+    pub fn unpacked_len(&self, i: usize) -> u64 {
+        let end = self.unpacked_offsets[i] as u64;
+        let prev = if i == 0 { 0 } else { self.unpacked_offsets[i - 1] as u64 };
+        end - prev
     }
 }
 

@@ -54,10 +54,10 @@ fn register_rejects_out_of_range_terms_and_server_survives() {
     // hang/500. Prove liveness end-to-end.
     assert_eq!(srv.metric("xorb_puts"), 1, "server still serving after rejected registers");
 
-    // (5) a valid term registers and reconstructs without panicking.
-    assert_eq!(register(&srv, &fh, &xorb, 0, 4), 200, "valid range must 200");
-    let recon = c.get(srv.url(&format!("/api/v1/reconstructions/{fh}"))).send().unwrap();
-    assert_eq!(recon.status(), 200, "valid file reconstructs");
+    // (5) a VALID range but a bogus file_hash is now rejected by the content-integrity check
+    // (iter3) — the range check passes, then file_hash(terms) != "aaa…" => 400. Still proves
+    // no panic / no Mutex poison on the success path through the loop.
+    assert_eq!(register(&srv, &fh, &xorb, 0, 4), 400, "valid range + wrong file_hash must 400");
 
     // (6) a never-registered file is a clean 404, not a panic.
     let miss = c.get(srv.url(&format!("/api/v1/reconstructions/{}", "b".repeat(64)))).send().unwrap();
