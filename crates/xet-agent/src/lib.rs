@@ -1,10 +1,14 @@
 //! `xet-agent` — the client/ingest pipeline (`Prompt.md` §7, §8).
 //!
-//! M0 implements a working ingest→reconstruct round-trip using the real Xet primitives
-//! (Gearhash CDC, BLAKE3 hashing, xorb serialization, file hash) from the vendored fork.
-//! File registration uses the server's M0-internal `POST /files` JSON; the binary
-//! `mdb_shard` wire format (stock-client interop) is a later refinement. Three-tier dedup
-//! (§7.1) also lands later — M0 always packs novel chunks.
+//! M0/M1 implement a working dedup'd ingest→reconstruct round-trip using the real Xet
+//! primitives (Gearhash CDC, BLAKE3 hashing, xorb serialization, file hash) from the
+//! vendored fork. Ingest resolves each chunk against the server's global dedup index
+//! (`GET /chunks`, tier 3 of §7.1) and references existing xorbs for known runs, uploading
+//! only novel runs — so a localized edit re-uploads only the perturbed neighborhood.
+//!
+//! File registration uses the server's M0-internal `POST /files` JSON; the binary `mdb_shard`
+//! wire format (stock-client interop), the local session/shard caches (tiers 1–2), and the
+//! minimum-dedup-run fragmentation control (§7.3) are later refinements.
 
 use std::io::Cursor;
 use std::path::Path;
@@ -30,62 +34,80 @@ impl Ingested {
     }
 }
 
-/// Chunk, pack into xorbs, upload novel xorbs, then register the file's reconstruction terms.
+/// Where a chunk already lives, per the global dedup index: `(xorb_hash_hex, chunk_index)`.
+type ChunkLoc = (String, u32);
+
+/// Chunk, deduplicate against the server, upload novel xorbs, then register the file.
 /// Returns the file's content hash (deterministic for identical bytes).
-pub fn ingest_bytes(
-    base_url: &str,
-    volume: &str,
-    dest: &str,
-    bytes: &[u8],
-    _scratch: &Path,
-) -> Result<Ingested> {
-    // 1. Content-defined chunking (Gearhash CDC); each Chunk carries its BLAKE3 hash + data.
+pub fn ingest_bytes(base_url: &str, volume: &str, dest: &str, bytes: &[u8], _scratch: &Path) -> Result<Ingested> {
+    // 1. Content-defined chunking; each Chunk carries its BLAKE3 hash + data.
     let chunks = Chunker::default().next_block(bytes, true);
-    ensure!(!chunks.is_empty() || bytes.is_empty(), "chunker produced no chunks for non-empty input");
 
     // 2. Whole-file hash over the ordered (chunk_hash, uncompressed_size) list.
     let file_pairs: Vec<_> = chunks.iter().map(|c| (c.hash, c.data.len() as u64)).collect();
     let fh = file_hash(&file_pairs);
 
-    // 3. Pack chunks into xorbs, upload each, and accumulate one term per xorb.
     let client = reqwest::blocking::Client::new();
+
+    // 3. Tier 3: resolve every chunk against the global dedup index up front.
+    let locs: Vec<Option<ChunkLoc>> = chunks
+        .iter()
+        .map(|c| query_chunk(&client, base_url, &c.hash.hex()))
+        .collect::<Result<_>>()?;
+
+    // 4. Walk the chunk list, emitting one term per run: a deduped reference to an existing
+    //    xorb (contiguous, same xorb, consecutive indices) or a freshly uploaded novel xorb.
     let mut terms = Vec::new();
     let mut i = 0;
     while i < chunks.len() {
-        let mut j = i;
-        let mut acc = 0usize;
-        while j < chunks.len() && (j - i) < MAX_XORB_CHUNKS && acc + chunks[j].data.len() <= MAX_XORB_UNCOMPRESSED {
-            acc += chunks[j].data.len();
-            j += 1;
+        match &locs[i] {
+            Some((xorb, idx)) => {
+                let start_idx = *idx;
+                let mut j = i + 1;
+                let mut expected = idx + 1;
+                while j < chunks.len() {
+                    match &locs[j] {
+                        Some((x2, i2)) if x2 == xorb && *i2 == expected => {
+                            expected += 1;
+                            j += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                let unpacked: u64 = chunks[i..j].iter().map(|c| c.data.len() as u64).sum();
+                terms.push(json!({ "xorb": xorb, "start": start_idx, "end": expected, "unpacked_length": unpacked }));
+                i = j;
+            }
+            None => {
+                // Gather a contiguous novel run, bounded by the xorb caps, then pack + upload it.
+                let mut j = i;
+                let mut acc = 0usize;
+                while j < chunks.len()
+                    && locs[j].is_none()
+                    && (j - i) < MAX_XORB_CHUNKS
+                    && acc + chunks[j].data.len() <= MAX_XORB_UNCOMPRESSED
+                {
+                    acc += chunks[j].data.len();
+                    j += 1;
+                }
+                if j == i {
+                    j = i + 1; // a single chunk larger than the cap still gets its own xorb
+                }
+                let group = &chunks[i..j];
+                let raw = RawXorbData::from_chunks(group, vec![0]);
+                let serialized =
+                    SerializedXorbObject::from_xorb(raw, /*footer=*/ true, "lz4", 0).context("serialize xorb")?;
+                let xorb_hex = serialized.hash.hex();
+                upload_xorb(&client, base_url, &xorb_hex, serialized.serialized_data)?;
+
+                let unpacked: u64 = group.iter().map(|c| c.data.len() as u64).sum();
+                terms.push(json!({ "xorb": xorb_hex, "start": 0, "end": group.len(), "unpacked_length": unpacked }));
+                i = j;
+            }
         }
-        if j == i {
-            j = i + 1; // a single chunk larger than the cap still gets its own xorb
-        }
-        let group = &chunks[i..j];
-
-        let raw = RawXorbData::from_chunks(group, vec![0]);
-        let serialized = SerializedXorbObject::from_xorb(raw, /*footer=*/ true, "lz4", 0)
-            .context("serialize xorb")?;
-        let xorb_hex = serialized.hash.hex();
-
-        let resp = client
-            .post(format!("{base_url}/api/v1/xorbs/default/{xorb_hex}"))
-            .body(serialized.serialized_data)
-            .send()
-            .context("upload xorb")?;
-        ensure!(resp.status().is_success(), "xorb upload failed: HTTP {}", resp.status());
-
-        let unpacked: u64 = group.iter().map(|c| c.data.len() as u64).sum();
-        terms.push(json!({
-            "xorb": xorb_hex,
-            "start": 0,
-            "end": group.len(),
-            "unpacked_length": unpacked,
-        }));
-        i = j;
     }
 
-    // 4. Register the file (terms + VFS catalog entry).
+    // 5. Register the file (terms + VFS catalog entry).
     let total_size: u64 = chunks.iter().map(|c| c.data.len() as u64).sum();
     let resp = client
         .post(format!("{base_url}/api/v1/files"))
@@ -101,6 +123,32 @@ pub fn ingest_bytes(
     ensure!(resp.status().is_success(), "file registration failed: HTTP {}", resp.status());
 
     Ok(Ingested { file_hash_hex: fh.hex() })
+}
+
+/// Query the global dedup index for one chunk. `Some(loc)` on a hit, `None` on a `404` miss.
+fn query_chunk(client: &reqwest::blocking::Client, base_url: &str, hash_hex: &str) -> Result<Option<ChunkLoc>> {
+    let resp = client
+        .get(format!("{base_url}/api/v1/chunks/default-merkledb/{hash_hex}"))
+        .send()
+        .context("chunk dedup query")?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    ensure!(resp.status().is_success(), "chunk query failed: HTTP {}", resp.status());
+    let v: serde_json::Value = resp.json().context("parse chunk response")?;
+    let xorb = v["xorb"].as_str().context("chunk response missing xorb")?.to_string();
+    let index = v["chunk_index"].as_u64().context("chunk response missing chunk_index")? as u32;
+    Ok(Some((xorb, index)))
+}
+
+fn upload_xorb(client: &reqwest::blocking::Client, base_url: &str, xorb_hex: &str, bytes: Vec<u8>) -> Result<()> {
+    let resp = client
+        .post(format!("{base_url}/api/v1/xorbs/default/{xorb_hex}"))
+        .body(bytes)
+        .send()
+        .context("upload xorb")?;
+    ensure!(resp.status().is_success(), "xorb upload failed: HTTP {}", resp.status());
+    Ok(())
 }
 
 /// Fetch a file's reconstruction and reassemble its bytes: for each term, fetch the xorb byte
@@ -154,7 +202,6 @@ pub fn reconstruct(base_url: &str, file_hash_hex: &str) -> Result<Vec<u8>> {
         }
     }
 
-    // Whole-file reconstruction starts at the first term's first chunk.
     let offset = recon["offset_into_first_range"].as_u64().unwrap_or(0) as usize;
     if offset > 0 && offset <= out.len() {
         out.drain(0..offset);
