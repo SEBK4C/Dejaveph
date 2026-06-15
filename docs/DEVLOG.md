@@ -6,6 +6,35 @@ patch+test it → push. Isolation, deployment, and QoL notes accumulate here.
 
 ---
 
+## Iteration 2 — 2026-06-15 ~12:25 UTC — resource & concurrency hardening (branch `harden/security-iter2`, stacked on iter1)
+
+**Angle this round:** resource-exhaustion + concurrency/data-loss (vs iter1's auth/panic angle).
+
+**Fix — `get_range` memory amplification (LOW→ real DoS lever).** local-fs `get_range` did
+`tokio::fs::read(whole_file)` then sliced, so *every* ranged GET pulled the full ≤64 MiB xorb
+into memory. Many small concurrent ranges = large memory/IO amplification. Rewrote to
+`File::open` + `seek(start)` + `read_exact(len)` — reads only the requested span; also removed
+the `end as usize + 1` overflow path. New test `m0_range_edges` asserts byte-exact slices at
+last-byte / single-byte / open-ended / past-EOF-clamp / unsatisfiable boundaries.
+
+**Fix — GC TOCTOU data-loss race (MEDIUM, test-hook).** `test_gc` computed the root set under
+one lock, released it, then deleted + re-locked per xorb — so a `register_file` landing in the
+window could reference a xorb about to be swept, orphaning a live file. Rewrote so the root set
+is computed AND the unreferenced xorbs are evicted from the index under a **single** lock; since
+`register_file` rejects terms whose xorb isn't in the index, eviction-under-lock means no
+concurrent register can reference a doomed xorb. Async blob deletes run after, on a consistent
+index.
+
+**Deferred (needs care, not rushed):** HMAC+TTL signing for the local-fs presign URL. Doing it
+right means making `/xorb-data` a capability URL (exempt from bearer, gated by signature+expiry)
+— an auth-model change that reworks `auth_mw` + the m0_xorbs direct-access test. Scheduled as
+its own iteration rather than a rushed half-measure.
+
+**Tests:** new `m0_range_edges` + full sweep — conformance 4/4, m0/m1, m2/m3 FUSE, m5
+(gc/scrub) all green; no stale mounts.
+
+---
+
 ## Iteration 1 — 2026-06-15 ~11:55 UTC — security hardening (branch `harden/security-iter1`)
 
 **Context.** Prior manual audit of `main` (`0b289e2`) surfaced 2 HIGH, 3 MEDIUM, 3 LOW
@@ -67,7 +96,8 @@ FUSE m3 all green.
 - [ ] MEDIUM: local-fs `presign_get` returns an unsigned, non-expiring URL though docs claim
       "HMAC-signed". Implement HMAC+TTL or correct the design docs.
 - [ ] MEDIUM: non-constant-time bearer token comparison (`subtle::ConstantTimeEq`).
-- [ ] LOW: `get_range` reads the whole object into memory per request (IO amplification).
-- [ ] LOW: GC TOCTOU data-loss race (test-hooks only).
+- [x] LOW: `get_range` reads the whole object into memory per request (IO amplification). — iter2
+- [x] LOW: GC TOCTOU data-loss race (test-hooks only). — iter2
+- [ ] MEDIUM: local-fs presign HMAC+TTL capability URL (auth-model rework) — deferred from iter2.
 - [ ] QoL: qemu/Nix-VM e2e harness; NixOS module with 1Password secret integration; Ceph
       plug-and-play deployment doc.
