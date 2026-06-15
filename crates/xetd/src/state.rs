@@ -141,10 +141,18 @@ pub struct AppState {
     /// Opaque bearer tokens for `tokens` mode (write implies read). Ignored in loopback.
     pub read_token: String,
     pub write_token: String,
+    /// Key for verifying `/xorb-data` capability URLs (matches the local-fs blob store's signer).
+    pub cap_key: [u8; 32],
 }
 
 impl AppState {
-    pub fn new(blob: Arc<dyn BlobStore>, auth: AuthMode, read_token: String, write_token: String) -> Arc<Self> {
+    pub fn new(
+        blob: Arc<dyn BlobStore>,
+        auth: AuthMode,
+        read_token: String,
+        write_token: String,
+        cap_key: [u8; 32],
+    ) -> Arc<Self> {
         Arc::new(Self {
             blob,
             index: Mutex::new(Index::default()),
@@ -152,6 +160,7 @@ impl AppState {
             auth,
             read_token,
             write_token,
+            cap_key,
         })
     }
 }
