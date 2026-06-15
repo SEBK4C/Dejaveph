@@ -13,7 +13,7 @@ Companion docs: [`DEVLOG.md`](DEVLOG.md) (per-iteration narrative), [`DEPLOYMENT
 | ⬜ | Not started |
 | ❄️ | Deferred / blocked (reason noted) |
 
-_Last updated: 2026-06-15 (after loop iteration 7)._
+_Last updated: 2026-06-15 (after loop iteration 7; TLS + verified-negative)._
 
 ---
 
@@ -32,6 +32,7 @@ Two independent stacks. Review/merge each chain in order.
 | #2 | feat(nixos): services.xetd + 1Password(opnix)/Ceph | `main` | 🔵 open |
 | #4 | feat(xetfs): mount CLI + services.xetfs (client half) | `#2` | 🔵 open (stacked) |
 | #6 | feat(templates): three-machine flake templates | `#4` | 🔵 open (stacked) |
+| #10 | feat(tls): TLS-fronted gateway (caddy) + rustls clients | `#6` | 🔵 open (stacked) |
 
 **Next merge action (human):** the security chain is now **6 deep** (`#1 → #3 → #5 → #7 → #8 →
 #9`) — worth merging the chain into `main` before it grows further; then the deployment chain
@@ -87,7 +88,7 @@ Findings from the rolling audit. Severity from the original review of `main@0b28
 | MED | concurrent `put` of same novel xorb: corrupt object + double-count | MED | 🔵 | PR #8 — unique temp + hard-link publish |
 | MED | `register_file` chunk-count amplification (tiny body → huge alloc) | MED | 🔵 | PR #9 — `MAX_FILE_CHUNKS` cap |
 | LOW | `put_xorb` decompression "bomb" — **largely verified-negative (iter7)** | LOW | ⬜ | fork's `deserialize_chunk_header` already rejects `uncompressed>128KiB`/`compressed>256KiB` **before** decompress, so no GB-OOM. Residual: a 256 KiB compressed chunk can transiently decompress to ~64 MiB before the length check rejects (concurrency-amplifiable). Real fix = size-capped writer in the fork's `deserialize_chunk_with_header_to_writer`. An xetd-side header pre-scan is **redundant** (same thresholds) — backed out. |
-| LOW | no TLS (cleartext bearer) | LOW | ⬜ | deployment: front with TLS proxy (doc'd in DEPLOYMENT.md) |
+| LOW | no TLS (cleartext bearer) | LOW | 🔵 | PR #10 — caddy TLS front + `rustls-tls` clients |
 
 ### Future audit angles (queued, ~1 per iteration)
 - [x] Unbounded allocation / decompression bomb — register amplification **done iter6 (PR #9)**;
@@ -111,6 +112,7 @@ Findings from the rolling audit. Severity from the original review of `main@0b28
 | `services.xetfs` mount module (+ `XETD_TOKEN` from 1Password) | 🔵 | PR #4 `nixos/xetfs.nix` |
 | **Three flake templates** (`nix flake init -t …#{gateway,client,demo}`) | 🔵 | PR #6 — see §E |
 | **`dejaveph` helpers** (`doctor`, `bootstrap-ceph`) | ✅ | `scripts/` on `main` — bash, not yet a unified Rust CLI |
+| **TLS-fronted gateway** (caddy) + `rustls-tls` clients | 🔵 | PR #10 — closes the no-TLS finding |
 | `/healthz` + `--ready` semantics for `systemctl` | ⬜ | "is it working?" in one command |
 | opnix template that *creates* the RGW item from `radosgw-admin` | ⬜ | closes the manual copy-paste gap |
 | qemu / Nix-VM e2e test harness | ❄️ | backlog; needs `nix` on a builder (this host has none) |
@@ -227,3 +229,7 @@ logging it in DEVLOG.md; reflect each result here.
 - **2026-06-15 · Iteration 6** — Allocation-amplification angle: `register_file` `MAX_FILE_CHUNKS`
   cap stops a tiny body of wide terms from exploding `file_pairs`. New `m0_amplification` + full
   e2e green. PR #9. Also surfaced (deferred, fork-level) the `put_xorb` decompression bomb.
+- **2026-06-15 · Iteration 7** — Investigated the decompression bomb → **verified-negative** for
+  GB-OOM (the fork's `deserialize_chunk_header` caps sizes before decompress); a redundant
+  xetd-side pre-scan was written and **backed out** rather than shipped. Delivered the real value:
+  **TLS-fronted gateway** (caddy) + `rustls-tls` clients, closing the last LOW finding. PR #10.
