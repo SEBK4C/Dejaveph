@@ -31,7 +31,7 @@ use serde_json::json;
 use std::sync::atomic::Ordering::Relaxed;
 use tracing_subscriber::EnvFilter;
 use xet_core::cas_object::XorbObject;
-use xet_core::merklehash::DataHash;
+use xet_core::merklehash::{file_hash, DataHash};
 
 use crate::blob::{BlobStore, LocalFsBlobStore};
 use crate::state::{AppState, AuthMode, FileRecord, Term};
@@ -358,6 +358,9 @@ async fn register_file(State(st): State<Arc<AppState>>, Json(req): Json<Register
     let mut idx = st.index.lock();
 
     let mut terms = Vec::with_capacity(req.terms.len());
+    // (chunk_hash, unpacked_len) for every chunk the terms reference, in order — used to
+    // recompute the file hash and prove the claimed `file_hash` commits to this content.
+    let mut file_pairs: Vec<(DataHash, u64)> = Vec::new();
     for t in &req.terms {
         let Ok(xorb) = DataHash::from_hex(&t.xorb) else {
             return (StatusCode::BAD_REQUEST, "malformed xorb hash").into_response();
@@ -377,7 +380,22 @@ async fn register_file(State(st): State<Arc<AppState>>, Json(req): Json<Register
             )
                 .into_response();
         }
+        for i in t.start..t.end {
+            file_pairs.push((meta.chunk_hashes[i as usize], meta.unpacked_len(i as usize)));
+        }
         terms.push(Term { xorb, start: t.start, end: t.end, unpacked_length: t.unpacked_length });
+    }
+
+    // Content-addressing integrity: the claimed file_hash MUST be the Merkle file hash of the
+    // chunks the terms actually reference. Without this, a write-token holder could register
+    // file_hash X → arbitrary content Y, and any reader of X would get Y (cache/content
+    // poisoning). Recompute and reject the mismatch (MEDIUM).
+    if file_hash(&file_pairs) != fh {
+        return (
+            StatusCode::BAD_REQUEST,
+            "file_hash does not match the content of the supplied terms",
+        )
+            .into_response();
     }
 
     let existed = idx.files.contains_key(&fh);

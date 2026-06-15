@@ -6,6 +6,40 @@ patch+test it → push. Isolation, deployment, and QoL notes accumulate here.
 
 ---
 
+## Iteration 3 — 2026-06-15 ~12:40 UTC — content-integrity + deploy templates (branch `harden/security-iter3`, stacked on iter2)
+
+**Angle this round:** content-addressing integrity (vs iter1 auth/panic, iter2 resource/concurrency).
+
+**Fix — `register_file` didn't verify `file_hash` (MEDIUM, content/cache poisoning).** A
+write-token holder could register `file_hash X → arbitrary terms (content Y)`; any reader of X
+got Y. The fix recomputes the Merkle file hash server-side from the chunks the terms actually
+reference and rejects a mismatch (`400`):
+- `XorbMeta` now stores per-xorb `chunk_hashes` (from the validated footer) + an `unpacked_len(i)`
+  helper (cumulative offsets → per-chunk length).
+- `register_file` walks the terms, builds the ordered `(chunk_hash, unpacked_len)` sequence, and
+  asserts `file_hash(seq) == claimed` before inserting.
+
+**Why this is safe / correctly scoped:** the agent computes the same file hash over the same
+chunks, and dedup guarantees referenced xorbs carry identical chunk hashes — so legitimate
+registrations are unaffected. The *entire existing e2e suite is the correctness regression*:
+m0_core_cas, m1_dedup, and especially **m3_writable** (re-ingest → re-register through the agent,
+the `incremental == full` path) all pass unchanged. The iter1 `m0_register_validation` test
+registered a bogus hash with a valid range expecting 200 — now correctly 400 (updated).
+
+**New test `m0_filehash_integrity`** (the actual poisoning attempt): bind A's file_hash to B's
+content → 400; single-bit-flipped hash over valid terms → 400; correct hashes → 200; original
+file still reconstructs. **Feature-affecting** (registration now enforces a contract it didn't),
+so branched + PR'd.
+
+**QoL — three-machine flake templates** (task: "define template for three machines" +
+plug-and-play Ceph). Added `templates/{gateway,client,demo}` so `nix flake init -t …#gateway`
+yields a ready NixOS config. (On the deployment branch family; see commit.)
+
+**Tests:** new integrity test + full sweep (conformance, m0/m1, m2/m3 FUSE, m5) green; no stale
+mounts.
+
+---
+
 ## Iteration 2 — 2026-06-15 ~12:25 UTC — resource & concurrency hardening (branch `harden/security-iter2`, stacked on iter1)
 
 **Angle this round:** resource-exhaustion + concurrency/data-loss (vs iter1's auth/panic angle).
@@ -91,7 +125,7 @@ Tests re-run after both changes: m0_register_validation, m5_operate (token path)
 FUSE m3 all green.
 
 ### Backlog / hypotheses for later iterations
-- [ ] MEDIUM: `register_file` does not verify `file_hash` commits to the terms' content
+- [x] MEDIUM: `register_file` does not verify `file_hash` commits to the terms' content — iter3
       (content-addressing bypass / cache poisoning). Closes with the binary `mdb_shard` path.
 - [ ] MEDIUM: local-fs `presign_get` returns an unsigned, non-expiring URL though docs claim
       "HMAC-signed". Implement HMAC+TTL or correct the design docs.
