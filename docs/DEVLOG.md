@@ -6,6 +6,33 @@ patch+test it → push. Isolation, deployment, and QoL notes accumulate here.
 
 ---
 
+## Iteration 6 — 2026-06-15 ~13:25 UTC — allocation-amplification DoS (branch `harden/security-iter6`, stacked on iter5)
+
+**Angle this round:** unbounded allocation / amplification (a queued future angle).
+
+**Fix — `register_file` chunk-count amplification (MEDIUM, DoS).** Each term is ~110 bytes of
+JSON but may reference up to a full xorb's 8192-chunk range, so a 128 MiB body of wide terms
+could expand `file_pairs` to billions of `(hash, len)` entries (and the file-hash work over them)
+— a tiny request → multi-hundred-GB allocation. Added `MAX_FILE_CHUNKS = 2_000_000` (≈ a 128 GiB
+file at the 64 KiB target chunk size) and reject (`400`, distinct message) **before** growing the
+Vec and before the file_hash check. New `m0_amplification` test: 8000×256-chunk terms → over-cap
+→ 400 "too many chunks"; server stays healthy; a normal in-bounds round-trip still works.
+
+**New finding (tested, deferred to a fork-level fix) — `put_xorb` decompression bomb.**
+`validate_xorb_object` → `deserialize_chunk` decompresses each chunk into a `Vec` whose size is
+determined by the LZ4 stream and only checked against the header *after* allocation. The fork
+defines `MAX_CHUNK_SIZE` (128 KiB) but does **not** enforce it during decompression, so a single
+crafted, highly-compressible chunk (compressed ≤ body limit, ~255× expansion) could allocate
+multiple GB during validation before rejection. Peak is bounded by the *largest single chunk*
+(each chunk's buffer drops before the next), not the sum — but still a real OOM lever. The clean
+fix is a size-capped decompression writer in the fork's `deserialize_chunk_*` (enforce
+`MAX_CHUNK_SIZE`); tracked in Plan&Execution §B rather than hacked around `xetd` this iteration.
+
+**Tests:** new `m0_amplification` + full sweep (conformance, m0/m1, m2/m3 FUSE, m5,
+concurrent-put, capability) green; no stale mounts.
+
+---
+
 ## Iteration 5 — 2026-06-15 ~13:10 UTC — blob write-path concurrency (branch `harden/security-iter5`, stacked on iter4)
 
 **Angle this round:** concurrency/durability of the local-fs blob write path (the HIGH+MEDIUM

@@ -40,6 +40,12 @@ use crate::state::{AppState, AuthMode, FileRecord, Term};
 /// Max accepted request body. Xorbs are ≤ `MAX_XORB_SIZE` (64 MiB); allow headroom.
 const MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
 
+/// Max chunks a single file registration may reference (sum of all term ranges). Bounds the
+/// `file_pairs` allocation + file-hash work so a small body of wide terms can't blow up memory
+/// (§ amplification guard). ~2M chunks ≈ a 128 GiB file at the 64 KiB target chunk size — far
+/// beyond any real M0 file; larger files would register in parts later.
+const MAX_FILE_CHUNKS: u64 = 2_000_000;
+
 #[derive(Parser, Debug)]
 #[command(name = "xetd", about = "Self-hosted Xet CAS server")]
 struct Args {
@@ -389,6 +395,17 @@ async fn register_file(State(st): State<Arc<AppState>>, Json(req): Json<Register
             return (
                 StatusCode::BAD_REQUEST,
                 "term chunk range out of bounds (require 0 <= start < end <= num_chunks)",
+            )
+                .into_response();
+        }
+        // Amplification guard: each ~110-byte term may reference up to a full xorb's 8192-chunk
+        // range, so a 128 MiB body of terms could expand `file_pairs` to billions of entries (and
+        // the file_hash over them) — a tiny request → multi-hundred-GB allocation. Cap the total
+        // referenced chunk count and reject early, before growing the Vec (DoS).
+        if file_pairs.len() as u64 + (t.end - t.start) as u64 > MAX_FILE_CHUNKS {
+            return (
+                StatusCode::BAD_REQUEST,
+                "file references too many chunks (exceeds the per-file chunk limit)",
             )
                 .into_response();
         }
