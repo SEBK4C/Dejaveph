@@ -1,2 +1,5 @@
 /target
 **/*.rs.bk
+# Nix build symlinks
+/result
+/result-*
