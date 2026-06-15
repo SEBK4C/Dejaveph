@@ -128,9 +128,9 @@ Needs `/dev/fuse` + the setuid `fusermount` from `pkgs.fuse`.
 
 ```bash
 # read-only
-xetfs --server http://dejaveph.home.arpa:9777 --volume models /mnt/models
+xetfs --server https://dejaveph.home.arpa --volume models /mnt/models
 # read-write (write-back on close); tokens-mode server needs XETD_TOKEN in the environment
-XETD_TOKEN=write-… xetfs --server http://dejaveph.home.arpa:9777 --volume scratch --rw /mnt/scratch
+XETD_TOKEN=write-… xetfs --server https://dejaveph.home.arpa --volume scratch --rw /mnt/scratch
 ```
 
 Declaratively on NixOS via the `xetfs` module (the client half), with the mount's bearer token
@@ -144,12 +144,12 @@ sourced from 1Password just like the server's RGW creds:
     package = dejaveph.packages.${pkgs.system}.xetfs;
     mounts = {
       models = {
-        server = "http://dejaveph.home.arpa:9777";
+        server = "https://dejaveph.home.arpa";
         volume = "models";
         mountpoint = "/mnt/models";          # read-only
       };
       scratch = {
-        server = "http://dejaveph.home.arpa:9777";
+        server = "https://dejaveph.home.arpa";
         volume = "scratch";
         mountpoint = "/mnt/scratch";
         readWrite = true;
@@ -167,9 +167,12 @@ render `XETD_TOKEN=op://Infrastructure/dejaveph-xetd-tokens/write_token` to that
 
 ## Security posture recap (matches the in-code hardening)
 
-- **TLS:** xetd serves plain HTTP — always front it with a TLS-terminating proxy
-  (`rgw.ceph.home.arpa` and `dejaveph.home.arpa` should both be HTTPS). Bearer tokens are
-  otherwise sent in cleartext.
+- **TLS:** xetd speaks plain HTTP, so the `gateway` template binds it to `127.0.0.1` and fronts
+  it with **caddy** (TLS, `https://dejaveph.home.arpa`) — bearer tokens never hit the wire in
+  cleartext. With the s3 backend this is clean: reconstruction returns presigned **RGW** URLs, so
+  clients only call the small JSON API through caddy and fetch bulk bytes from RGW directly (also
+  HTTPS). The `xetfs`/agent clients are built with `rustls-tls` so they can use `https://`. Use
+  `tls internal` (Caddy's CA) for the `home.arpa` zone, or ACME for a public domain.
 - **Secrets:** RGW keys live in 1Password, render to tmpfs via opnix, and reach xetd through a
   systemd credential — never the Nix store, never `ps`/journal.
 - **Least privilege:** dedicated `dejaveph` RGW user scoped to one bucket; the systemd unit runs

@@ -45,8 +45,10 @@
             services.xetd = {
               enable = true;
               package = dejaveph.packages.${pkgs.system}.xetd-s3;
-              listen = "0.0.0.0:9777";
-              openFirewall = true;
+              # Bind to loopback — caddy (below) terminates TLS and proxies to it, so bearer
+              # tokens never travel in cleartext on the wire.
+              listen = "127.0.0.1:9777";
+              openFirewall = false;
               durability = "fsync";
               auth = "tokens";
               backend = "s3";
@@ -62,8 +64,19 @@
               wants = [ "onepassword-secrets.service" ];
             };
 
-            # TODO: front xetd (and RGW) with a TLS reverse proxy — xetd speaks plain HTTP and
-            # bearer tokens travel in cleartext. e.g. services.nginx or services.caddy.
+            # TLS reverse proxy. With the s3 backend, reconstruction returns presigned RGW URLs,
+            # so the only thing clients fetch from the gateway is the (small) JSON API — caddy
+            # fronts it over HTTPS. Clients then connect to https://dejaveph.home.arpa.
+            #   `tls internal` uses Caddy's built-in CA (fine for the home.arpa zone); for a public
+            #   domain, drop that line and Caddy obtains a real ACME cert automatically.
+            services.caddy = {
+              enable = true;
+              virtualHosts."dejaveph.home.arpa".extraConfig = ''
+                tls internal
+                reverse_proxy 127.0.0.1:9777
+              '';
+            };
+            networking.firewall.allowedTCPPorts = [ 443 ];
 
             system.stateVersion = "24.11";
           })

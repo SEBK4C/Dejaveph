@@ -42,12 +42,12 @@
               package = dejaveph.packages.${pkgs.system}.xetfs;
               mounts = {
                 models = {
-                  server = "http://dejaveph.home.arpa:9777";
+                  server = "https://dejaveph.home.arpa";
                   volume = "models";
                   mountpoint = "/mnt/models"; # read-only
                 };
                 scratch = {
-                  server = "http://dejaveph.home.arpa:9777";
+                  server = "https://dejaveph.home.arpa";
                   volume = "scratch";
                   mountpoint = "/mnt/scratch";
                   readWrite = true;
