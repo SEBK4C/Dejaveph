@@ -8,7 +8,7 @@
   };
 
   outputs = { self, nixpkgs, rust-overlay, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+    (flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
@@ -59,9 +59,25 @@
             mainProgram = "xetd";
           };
         };
+        # `nix build .#xetd-s3` — the Ceph/S3 backend build (`--features s3`, pulls aws-sdk-s3).
+        # The NixOS module's S3 backend requires THIS package, not the lean default.
+        packages.xetd-s3 = self.packages.${system}.xetd.overrideAttrs (old: {
+          pname = "xetd-s3";
+          cargoBuildFlags = [ "-p" "xetd" "--features" "s3" ];
+          # aws-sdk-s3's default TLS stack (aws-lc-rs / rustls) builds native code.
+          nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.cmake pkgs.perl ];
+          buildInputs = (old.buildInputs or [ ]) ++ [ pkgs.openssl ];
+        });
+
         packages.default = self.packages.${system}.xetd;
 
-        # `nix flake check` builds the server.
+        # `nix flake check` builds both server variants.
         checks.xetd = self.packages.${system}.xetd;
-      });
+        checks.xetd-s3 = self.packages.${system}.xetd-s3;
+      })) // {
+        # System-independent: the NixOS module (see ./nixos/module.nix, ./nixos/example.nix,
+        # and docs/DEPLOYMENT.md). Import alongside opnix for 1Password-backed RGW secrets.
+        nixosModules.default = import ./nixos/module.nix;
+        nixosModules.xetd = import ./nixos/module.nix;
+      };
 }
