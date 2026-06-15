@@ -6,6 +6,31 @@ patch+test it → push. Isolation, deployment, and QoL notes accumulate here.
 
 ---
 
+## Iteration 5 — 2026-06-15 ~13:10 UTC — blob write-path concurrency (branch `harden/security-iter5`, stacked on iter4)
+
+**Angle this round:** concurrency/durability of the local-fs blob write path (the HIGH+MEDIUM
+audit backlog is cleared; moving to the queued future angles).
+
+**Fix — concurrent `put` of the same novel xorb could persist a corrupt object + double-count
+(MEDIUM).** `LocalFsBlobStore::put` used a fixed temp name `.{hash}.tmp` and published with
+`rename`. Two simultaneous uploads of the same novel hash therefore:
+1. **Corruption:** shared the one temp file — the second writer's `O_TRUNC` open could truncate
+   the first writer's bytes mid-publish, so a partial/corrupt object could land under the content
+   hash (the in-memory integrity gate passed; the *stored* file didn't).
+2. **Double-count:** `rename` always replaces, so every racing writer returned `Ok(true)` →
+   `xorb_puts`/`novel_bytes` over-counted.
+
+Fix: **unique temp name** per write (`.{hash}.{pid}.{seq}.tmp`, process-wide `AtomicU64`) so
+writers never share a temp; **publish via `hard_link`** — unlike `rename` it returns
+`AlreadyExists` when the final exists, so a racer is correctly reported `false` and each object is
+counted exactly once. Temp is removed best-effort afterward.
+
+**New test `m0_concurrent_put`:** 24 simultaneous identical uploads → exactly one
+`was_inserted:true`, `xorb_puts == 1`, and the served bytes are byte-exact (not truncated). Fails
+on the old `rename` path (all racers report inserted). Full sweep green incl. FUSE.
+
+---
+
 ## Iteration 4 — 2026-06-15 ~12:55 UTC — capability-URL access control (branch `harden/security-iter4`, stacked on iter3)
 
 **Angle this round:** capability-based access control (vs auth/panic, resource, integrity).
