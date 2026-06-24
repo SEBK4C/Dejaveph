@@ -188,10 +188,14 @@ async fn auth_mw(State(st): State<Arc<AppState>>, req: axum::extract::Request, n
     if token.is_empty() {
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     }
+    // Constant-time comparison so token validity can't be inferred from response timing.
+    // Evaluate both candidates (no short-circuit) before OR-ing.
     let ok = if need_write {
-        token == st.write_token
+        ct_eq(&token, &st.write_token)
     } else {
-        token == st.read_token || token == st.write_token
+        let r = ct_eq(&token, &st.read_token);
+        let w = ct_eq(&token, &st.write_token);
+        r | w
     };
     if ok {
         next.run(req).await
@@ -200,13 +204,21 @@ async fn auth_mw(State(st): State<Arc<AppState>>, req: axum::extract::Request, n
     }
 }
 
-/// Opaque per-process bearer token (16 bytes from /dev/urandom). Real JWT issuance is a refinement.
+/// Constant-time string equality for bearer tokens. `subtle` short-circuits only on length
+/// (public structure here), then compares the random bytes without data-dependent branching.
+fn ct_eq(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    a.as_bytes().ct_eq(b.as_bytes()).into()
+}
+
+/// Opaque per-process bearer token (16 CSPRNG bytes). Real JWT issuance is a refinement.
+///
+/// Sourced from the `getrandom(2)` syscall, which does not depend on `/dev/urandom` being
+/// mounted/openable. We **abort** rather than serve a degraded (predictable) token: a
+/// guessable `tokens`-mode credential is an auth bypass, so failing closed is mandatory (HIGH-2).
 fn random_token(prefix: &str) -> String {
-    use std::io::Read;
     let mut buf = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut buf);
-    }
+    getrandom::fill(&mut buf).expect("CSPRNG (getrandom) unavailable — refusing to mint a weak token");
     let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
     format!("{prefix}-{hex}")
 }
@@ -278,7 +290,7 @@ async fn reconstruct(State(st): State<Arc<AppState>>, AxPath(file_hash_hex): AxP
         byte_end: u64,
     }
     let collected: Result<Vec<Resolved>, StatusCode> = {
-        let idx = st.index.lock().unwrap();
+        let idx = st.index.lock();
         match idx.files.get(&fh) {
             None => Err(StatusCode::NOT_FOUND),
             Some(file) => {
@@ -289,8 +301,20 @@ async fn reconstruct(State(st): State<Arc<AppState>>, AxPath(file_hash_hex): AxP
                         bad = Some(StatusCode::INTERNAL_SERVER_ERROR);
                         break;
                     };
-                    let byte_start = if t.start == 0 { 0 } else { meta.boundary_offsets[(t.start - 1) as usize] as u64 };
-                    let byte_end = meta.boundary_offsets[(t.end - 1) as usize] as u64 - 1; // inclusive
+                    // Defensive: registration bounds the range, but never index raw — a stray bad
+                    // term must 500, not panic under this held Mutex (which would poison it).
+                    let byte_start = if t.start == 0 {
+                        0
+                    } else {
+                        match meta.boundary_offsets.get((t.start - 1) as usize) {
+                            Some(&o) => o as u64,
+                            None => { bad = Some(StatusCode::INTERNAL_SERVER_ERROR); break; }
+                        }
+                    };
+                    let byte_end = match t.end.checked_sub(1).and_then(|i| meta.boundary_offsets.get(i as usize)) {
+                        Some(&o) => o as u64 - 1, // inclusive
+                        None => { bad = Some(StatusCode::INTERNAL_SERVER_ERROR); break; }
+                    };
                     v.push(Resolved { xorb: t.xorb, start: t.start, end: t.end, unpacked: t.unpacked_length, byte_start, byte_end });
                 }
                 match bad {
@@ -331,15 +355,27 @@ async fn register_file(State(st): State<Arc<AppState>>, Json(req): Json<Register
     let Ok(fh) = DataHash::from_hex(&req.file_hash) else {
         return (StatusCode::BAD_REQUEST, "malformed file hash").into_response();
     };
-    let mut idx = st.index.lock().unwrap();
+    let mut idx = st.index.lock();
 
     let mut terms = Vec::with_capacity(req.terms.len());
     for t in &req.terms {
         let Ok(xorb) = DataHash::from_hex(&t.xorb) else {
             return (StatusCode::BAD_REQUEST, "malformed xorb hash").into_response();
         };
-        if !idx.xorbs.contains_key(&xorb) {
+        let Some(meta) = idx.xorbs.get(&xorb) else {
             return (StatusCode::BAD_REQUEST, "term references an xorb that was not uploaded").into_response();
+        };
+        // Chunk-index range is end-EXCLUSIVE [start,end). Bound it to the xorb's actual chunk
+        // count so reconstruct() can never index boundary_offsets out of range. Without this an
+        // out-of-range (or end==0 underflow) term panics inside the held index Mutex, poisoning
+        // it and bricking every subsequent request (§4.2; HIGH-1).
+        let num_chunks = meta.boundary_offsets.len() as u32;
+        if t.start >= t.end || t.end > num_chunks {
+            return (
+                StatusCode::BAD_REQUEST,
+                "term chunk range out of bounds (require 0 <= start < end <= num_chunks)",
+            )
+                .into_response();
         }
         terms.push(Term { xorb, start: t.start, end: t.end, unpacked_length: t.unpacked_length });
     }
@@ -361,7 +397,7 @@ struct EntryOut {
 
 /// List a volume's catalog entries (path → file_hash + size) for the VFS mount (§9.1).
 async fn list_entries(State(st): State<Arc<AppState>>, AxPath(volume): AxPath<String>) -> Response {
-    let idx = st.index.lock().unwrap();
+    let idx = st.index.lock();
     let mut out = Vec::new();
     for ((vol, path), fh) in idx.catalog.iter() {
         if vol == &volume {
@@ -402,7 +438,7 @@ async fn put_xorb(
     };
     if inserted {
         {
-            let mut idx = st.index.lock().unwrap();
+            let mut idx = st.index.lock();
             idx.put_xorb(hash, &info);
             idx.index_chunks(hash, &info); // populate the global dedup index
         }
@@ -465,7 +501,7 @@ async fn global_dedup(
     let Ok(ch) = DataHash::from_hex(&chunk_hex) else {
         return (StatusCode::BAD_REQUEST, "malformed chunk hash").into_response();
     };
-    let hit = st.index.lock().unwrap().chunk_index.get(&ch).map(|loc| {
+    let hit = st.index.lock().chunk_index.get(&ch).map(|loc| {
         json!({ "xorb": loc.xorb.hex(), "chunk_index": loc.index, "unpacked_length": loc.unpacked_len })
     });
     match hit {
@@ -500,7 +536,7 @@ async fn test_noop() -> Json<serde_json::Value> {
 /// BlobStore and the index. (A grace period for in-flight uploads is a later refinement.)
 async fn test_gc(State(st): State<Arc<AppState>>) -> Response {
     let (referenced, all): (HashSet<DataHash>, Vec<DataHash>) = {
-        let idx = st.index.lock().unwrap();
+        let idx = st.index.lock();
         let mut refd = HashSet::new();
         for f in idx.files.values() {
             for t in &f.terms {
@@ -513,7 +549,7 @@ async fn test_gc(State(st): State<Arc<AppState>>) -> Response {
     for x in all {
         if !referenced.contains(&x) {
             let _ = st.blob.delete(&x).await;
-            let mut idx = st.index.lock().unwrap();
+            let mut idx = st.index.lock();
             idx.xorbs.remove(&x);
             idx.chunk_index.retain(|_, loc| loc.xorb != x);
             swept += 1;
@@ -524,7 +560,7 @@ async fn test_gc(State(st): State<Arc<AppState>>) -> Response {
 
 /// Scrub (§11.2): re-verify each stored xorb's Merkle root; count mismatches as quarantined.
 async fn test_scrub(State(st): State<Arc<AppState>>) -> Response {
-    let xorbs: Vec<DataHash> = st.index.lock().unwrap().xorbs.keys().copied().collect();
+    let xorbs: Vec<DataHash> = st.index.lock().xorbs.keys().copied().collect();
     let mut checked = 0u64;
     let mut quarantined = 0u64;
     for x in xorbs {

@@ -5,7 +5,13 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+// Non-poisoning Mutex: if a handler ever panics while holding the index lock, parking_lot
+// releases it on unwind instead of poisoning it — so one panicking request can't brick every
+// subsequent one. The bounds checks elsewhere prevent the known panics; this caps the blast
+// radius of any future one (defense in depth).
+use parking_lot::Mutex;
 
 use xet_core::cas_object::XorbObjectInfoV1;
 use xet_core::merklehash::MerkleHash;
